@@ -1,31 +1,33 @@
 # Python
-.venv/
 __pycache__/
 *.pyc
-
-# Node / frontend
-node_modules/
-dist/
-build/
-
-# App artifacts
-output/
-media/
-*.mp4
-*.mov
-*.mkv
-*.webm
-
-# OS/IDE
-.DS_Store
+*.pyo
+*.pyd
+.Python
 .env
-.env.*
-.vscode/
 .venv/
 venv/
+ENV/
+*.egg-info/
+*.egg
+
+# Node.js
 node_modules/
+
+# Editors / macOS
+.vscode/
 .DS_Store
+
+# Project outputs
 output/
 media/
-__pycache__/
-*.pyc
+samples/
+temp/
+*.log
+
+# Large media
+*.mp4
+*.mkv
+*.webm
+*.avi
+*.mov
