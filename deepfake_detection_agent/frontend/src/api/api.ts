@@ -1,7 +1,8 @@
-// frontend/src/api/api.ts
-import axios from "axios";
-
-export const api = axios.create({
-  baseURL: "http://localhost:8001", // your backend URL
-  timeout: 10000,
-});
+// frontend/src/api.ts
+export const analyze = async (file: File, apiBase: string) => {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch(`${apiBase}/analyze`, { method: "POST", body: fd });
+  if (!res.ok) throw new Error(`Analyze failed: ${res.statusText}`);
+  return res.json();
+};
