@@ -101,15 +101,21 @@ def _is_video(path: str) -> bool:
     return (mt or "").startswith("video/")
 
 # =================== FastAPI ===================
-app = FastAPI(title="TruthLens API (HIL ready)", version="3.3")
+# =================== FastAPI ===================
+app = FastAPI(title="Deepfake Detection API (Portia-powered + HIL)", version="3.2")
+
+# Allow one or more origins (comma-separated), or "*" to allow all (hackathon mode)
+origins_env = os.getenv("FRONTEND_ORIGIN", "")
+ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()] or ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOW_ORIGINS,
+    allow_origins=ALLOWED_ORIGINS,      # e.g. ["https://chainbreaker.netlify.app", "http://localhost:5173"] or ["*"]
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+print("CORS allow_origins:", ALLOWED_ORIGINS)
 
 # serve anything in ./output at /media/*
 app.mount("/media", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="media")
