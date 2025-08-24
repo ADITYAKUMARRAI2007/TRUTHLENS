@@ -1,0 +1,3 @@
+ffmpeg
+poppler-utils
+tesseract-ocr
