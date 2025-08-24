@@ -529,9 +529,11 @@ def fuse_predictions(video_path, video_score: float, audio_score: Optional[float
     return label, float(final_score)
 
 # ───── Unified entrypoint ────────────────────────────────────────────────────
+# ========= Unified entrypoint =========
 def detect_ai_content(path: str) -> dict:
     """
     Routes images, PDFs, and videos to the right detector.
+    Always returns JSON; never throws so /analyze won't 500.
     """
     if is_image_path(path):
         try:
@@ -571,17 +573,32 @@ def detect_ai_content(path: str) -> dict:
                 "error": f"pdf_pathway_failed: {e.__class__.__name__}",
             }
 
-    # Video/Audio pathway
-    video_score = predict_video_fake(path)
-    audio_score = predict_audio_fake(path)
+    # ---- Video/Audio pathway (never crash) ----
+    try:
+        video_score = predict_video_fake(path)
+    except Exception as e:
+        return {
+            "result": "UNKNOWN",
+            "video_score": None,
+            "audio_score": None,
+            "ai_probability": None,
+            "error": f"video_model_failed: {e.__class__.__name__}",
+        }
+
+    audio_score = None
+    try:
+        audio_score = predict_audio_fake(path)
+    except Exception as e:
+        # non-fatal; keep going with video only
+        audio_score = None
+
     label, final_score = fuse_predictions(path, video_score, audio_score)
     return {
-        "result": label,        # 'REAL' | 'FAKE' | 'UNCERTAIN'
+        "result": label,
         "video_score": float(video_score) if video_score is not None else None,
         "audio_score": float(audio_score) if audio_score is not None else None,
         "ai_probability": float(final_score),
     }
-
 # ───── CLI ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     if len(sys.argv) < 2:
