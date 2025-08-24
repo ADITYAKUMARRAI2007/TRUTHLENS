@@ -5,6 +5,7 @@
 
 [build.environment]
   NODE_VERSION = "20"
+  NPM_FLAGS    = "--omit=optional"
 
 [[redirects]]
   from = "/*"
