@@ -12,23 +12,48 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---- detection / replay ----
+# ---- detection / replay (soft-optional for replay) ----
 from deepfake_detection_agent.backend.services.detection import detect_ai_content
-from deepfake_detection_agent.backend.services.reality_replay import run_reality_replay
 
-# ---- Google / Notion deps (helpers kept for Portia tools too) ----
-import requests
-from email.mime.text import MIMEText
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+try:
+    # If you really have this file, it will be used; otherwise we provide a fallback below.
+    from deepfake_detection_agent.backend.services.reality_replay import run_reality_replay  # type: ignore
+except Exception:
+    def run_reality_replay(video_path: str) -> str:
+        """Fallback: just return the original path if replay module isn’t available."""
+        return video_path
 
-# ---- Portia orchestrator (used on APPROVE) ----
-from deepfake_detection_agent.portia_agent import run_through_portia
+# ---- Google / Notion SDKs are optional at runtime ----
+# We guard imports so Render build/start won’t fail if you didn’t include them.
+try:
+    import requests
+except Exception:
+    requests = None  # type: ignore
+
+try:
+    from email.mime.text import MIMEText
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+except Exception:
+    Credentials = None  # type: ignore
+    build = None        # type: ignore
+    MediaFileUpload = None  # type: ignore
+    MIMEText = None     # type: ignore
+
+# ---- Portia orchestrator (optional) ----
+try:
+    from deepfake_detection_agent.portia_agent import run_through_portia  # type: ignore
+except Exception:
+    def run_through_portia(path: str):
+        return {"skipped": True, "reason": "portia_agent not available"}
 
 # =================== Config ===================
-PORT = int(os.getenv("PORT", 8001))
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
+PORT = int(os.getenv("PORT", "8001"))
+
+# Frontend CORS origin; default to * if not set (easier while iterating)
+FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN")
+ALLOW_ORIGINS = [FRONTEND_ORIGIN] if FRONTEND_ORIGIN else ["*"]
 
 # Gmail OAuth
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -45,7 +70,7 @@ NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
 # Owner email
-OWNER_EMAIL = os.getenv("OWNER_EMAIL", GMAIL_SENDER)
+OWNER_EMAIL = os.getenv("OWNER_EMAIL", GMAIL_SENDER or "")
 
 # Human-in-the-loop envs
 APP_SECRET = os.getenv("APP_SECRET", "dev-secret-change-me")
@@ -76,11 +101,11 @@ def _is_video(path: str) -> bool:
     return (mt or "").startswith("video/")
 
 # =================== FastAPI ===================
-app = FastAPI(title="Deepfake Detection API (Portia-powered + HIL)", version="3.2")
+app = FastAPI(title="TruthLens API (HIL ready)", version="3.3")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],
+    allow_origins=ALLOW_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -91,7 +116,7 @@ app.mount("/media", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="me
 
 @app.get("/")
 def root():
-    return {"message": "TruthLens API is running (Portia + Admin Approval) 🚀"}
+    return {"message": "TruthLens API is running 🚀"}
 
 @app.get("/health")
 def health():
@@ -106,13 +131,19 @@ def health():
     }
     return {"ok": True, **integrations}
 
-# =================== Gmail helpers ===================
+# =================== Gmail helpers (optional) ===================
 TOKEN_URI = "https://oauth2.googleapis.com/token"
 
-def _gmail_creds() -> Credentials:
-    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and GMAIL_REFRESH_TOKEN):
-        raise RuntimeError("Gmail OAuth ENV not set (GOOGLE_CLIENT_ID/SECRET, GMAIL_REFRESH_TOKEN)")
-    return Credentials(
+def _gmail_available() -> bool:
+    return all([
+        GMAIL_SENDER, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GMAIL_REFRESH_TOKEN,
+        Credentials is not None, build is not None, MIMEText is not None
+    ])
+
+def _gmail_creds():
+    if not _gmail_available():
+        raise RuntimeError("Gmail not configured or google libs missing.")
+    return Credentials(  # type: ignore
         token=None,
         refresh_token=GMAIL_REFRESH_TOKEN,
         token_uri=TOKEN_URI,
@@ -122,20 +153,29 @@ def _gmail_creds() -> Credentials:
     )
 
 def send_gmail(to_addr: str, subject: str, html_body: str):
+    if not _gmail_available():
+        print("Gmail not available; skipping email.")
+        return
     creds = _gmail_creds()
-    service = build("gmail", "v1", credentials=creds)
-    msg = MIMEText(html_body, "html")
+    service = build("gmail", "v1", credentials=creds)  # type: ignore
+    msg = MIMEText(html_body, "html")  # type: ignore
     msg["to"] = to_addr
     msg["from"] = GMAIL_SENDER
     msg["subject"] = subject
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
     service.users().messages().send(userId="me", body={"raw": raw}).execute()
 
-# =================== Drive helpers ===================
-def _drive_creds() -> Credentials:
-    if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and DRIVE_REFRESH_TOKEN):
-        raise RuntimeError("Drive OAuth ENV not set (GOOGLE_CLIENT_ID/SECRET, DRIVE_REFRESH_TOKEN)")
-    return Credentials(
+# =================== Drive helpers (optional) ===================
+def _drive_available() -> bool:
+    return all([
+        GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, DRIVE_REFRESH_TOKEN,
+        build is not None, MediaFileUpload is not None, Credentials is not None
+    ])
+
+def _drive_creds():
+    if not _drive_available():
+        raise RuntimeError("Drive not configured or google libs missing.")
+    return Credentials(  # type: ignore
         token=None,
         refresh_token=DRIVE_REFRESH_TOKEN,
         token_uri=TOKEN_URI,
@@ -145,14 +185,16 @@ def _drive_creds() -> Credentials:
     )
 
 def upload_to_drive(file_path: str, folder_id: Optional[str]) -> Optional[str]:
+    if not _drive_available():
+        return None
     if not file_path or not os.path.isfile(file_path):
         print(f"Drive upload skipped (file missing): {file_path}")
         return None
     try:
         creds = _drive_creds()
-        service = build("drive", "v3", credentials=creds)
+        service = build("drive", "v3", credentials=creds)  # type: ignore
         fname = os.path.basename(file_path)
-        media = MediaFileUpload(file_path, resumable=True)
+        media = MediaFileUpload(file_path, resumable=True)  # type: ignore
         meta = {"name": fname}
         if folder_id:
             meta["parents"] = [folder_id]
@@ -168,12 +210,12 @@ def upload_to_drive(file_path: str, folder_id: Optional[str]) -> Optional[str]:
         print("Drive upload failed:", traceback.format_exc())
         return None
 
-# =================== Notion helpers (debug) ===================
+# =================== Notion helpers (optional/debug) ===================
 NOTION_VERSION = "2022-06-28"
 
 def _notion_headers():
-    if not NOTION_API_KEY:
-        raise RuntimeError("NOTION_API_KEY is missing")
+    if not NOTION_API_KEY or requests is None:
+        raise RuntimeError("NOTION_API_KEY missing or requests not installed")
     return {
         "Authorization": f"Bearer {NOTION_API_KEY}",
         "Notion-Version": NOTION_VERSION,
@@ -182,6 +224,8 @@ def _notion_headers():
 
 @app.get("/debug/notion/schema")
 def notion_schema():
+    if requests is None:
+        return {"error": "requests not installed"}
     try:
         url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}"
         r = requests.get(url, headers=_notion_headers(), timeout=10)
@@ -191,6 +235,8 @@ def notion_schema():
 
 @app.post("/debug/notion/test")
 def notion_test():
+    if requests is None:
+        return {"error": "requests not installed"}
     try:
         now_ist = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%dT%H:%M:%S")
         url = "https://api.notion.com/v1/pages"
@@ -212,7 +258,7 @@ def notion_test():
         return {"error": traceback.format_exc()}
 
 # =================== Human-in-the-loop (Admin) ===================
-PENDING_JOBS = {}  # {job_id: {status, file, result, created_at, preview_link?, original_url?, replay_url?, approved?}}
+PENDING_JOBS = {}  # {job_id: {...}}
 
 def _sign_job(job_id: str) -> str:
     return hmac.new(APP_SECRET.encode(), job_id.encode(), hashlib.sha256).hexdigest()
@@ -231,30 +277,37 @@ def _public_media_url(filename: str) -> str:
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
     """
-    Human-in-the-loop flow:
-      1) Save upload (publicly served at /media)
-      2) Run light detection immediately (local)
-      3) Email ADMIN with Approve/Deny links
-      4) Return job_id with PENDING status
+    Flow:
+      1) Save upload under ./output (served at /media).
+      2) Run detection immediately.
+      3) (Optional) Email ADMIN with Approve/Deny links (if Gmail configured).
+      4) Return job_id with PENDING status for admin action.
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    job_id = str(int(time.time() * 1000))  # create id first so we can name file
-    safe_name = f"{job_id}_{Path(file.filename).name}"
+    job_id = str(int(time.time() * 1000))
+    safe_name = f"{job_id}_{Path(file.filename or 'upload').name}"
     public_path = OUTPUT_DIR / safe_name
 
     async with aiofiles.open(public_path, "wb") as f:
-        await f.write(await file.read())
+        # stream to disk to avoid RAM spikes
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            await f.write(chunk)
 
     try:
-        # Run quick local detection (supports images, pdfs & videos)
         detection = detect_ai_content(str(public_path))
         status = detection.get("result", "Unknown")
-
-        # Optional: upload original to Drive so admin can preview externally
-        preview_link = upload_to_drive(str(public_path), DRIVE_FOLDER_ID) if DRIVE_FOLDER_ID else None
-
-        # Save pending job with public original_url
         original_url = _public_media_url(safe_name)
+
+        preview_link = None
+        if _drive_available():
+            try:
+                preview_link = upload_to_drive(str(public_path), DRIVE_FOLDER_ID)
+            except Exception:
+                preview_link = None
+
         PENDING_JOBS[job_id] = {
             "status": "PENDING",
             "approved": False,
@@ -266,29 +319,27 @@ async def analyze(file: UploadFile = File(...)):
             "replay_url": None,
         }
 
-        # Build approver links
-        sig = _sign_job(job_id)
-        approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
-        deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
-
-        # Email admin
+        # email admin if Gmail configured
         try:
-            color = _color(status)
-            html = f"""
-            <div style="font-family:system-ui,sans-serif">
-              <h2>New Submission Pending Review</h2>
-              <p><b>Filename:</b> {Path(public_path).name}</p>
-              <p><b>Preliminary Result:</b> <span style="color:{color}">{status}</span></p>
-              <p><b>Scores:</b> {json.dumps({k:v for k,v in detection.items() if 'score' in k or k=='result'}, indent=2)}</p>
-              <p><a href="{original_url}">Local preview</a></p>
-              {'<p><a href="'+preview_link+'">Drive preview</a></p>' if preview_link else ''}
-              <p>
-                <a href="{approve_url}">✅ Approve</a> &nbsp;&nbsp;
-                <a href="{deny_url}">❌ Deny</a>
-              </p>
-            </div>
-            """
-            send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
+            if _gmail_available() and ADMIN_EMAIL:
+                sig = _sign_job(job_id)
+                approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
+                deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
+                color = _color(status)
+                html = f"""
+                <div style="font-family:system-ui,sans-serif">
+                  <h2>New Submission Pending Review</h2>
+                  <p><b>Filename:</b> {Path(public_path).name}</p>
+                  <p><b>Preliminary Result:</b> <span style="color:{color}">{status}</span></p>
+                  <pre style="background:#f6f8fa;padding:12px;border-radius:8px">{json.dumps(detection, indent=2)}</pre>
+                  <p><a href="{original_url}">Local preview</a>{(' — <a href="'+preview_link+'">Drive preview</a>') if preview_link else ''}</p>
+                  <p>
+                    <a href="{approve_url}">✅ Approve</a> &nbsp;&nbsp;
+                    <a href="{deny_url}">❌ Deny</a>
+                  </p>
+                </div>
+                """
+                send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
         except Exception:
             print("Admin email send failed:", traceback.format_exc())
 
@@ -302,20 +353,15 @@ async def analyze(file: UploadFile = File(...)):
         }
     except Exception:
         print("Analyze error:", traceback.format_exc())
-        # best-effort cleanup if something exploded immediately
         try: public_path.unlink(missing_ok=True)
         except Exception: pass
         raise HTTPException(status_code=500, detail="Analyze failed")
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
-    """Public: only APPROVED jobs visible; others 404 (keeps gate)."""
     job = PENDING_JOBS.get(job_id)
-    if not job:
+    if not job or job["status"] != "APPROVED":
         raise HTTPException(status_code=404, detail="Not found")
-    if job["status"] != "APPROVED":
-        raise HTTPException(status_code=404, detail="Not found")
-    # include a flat, UI-friendly shape
     return {
         "ok": True,
         "job_id": job_id,
@@ -324,19 +370,14 @@ def get_job(job_id: str):
         "result": job.get("result", {}),
         "original_url": job.get("original_url"),
         "replay_url": job.get("replay_url"),
-        # compatibility aliases some UIs expect:
-        "original_link": job.get("original_url"),
-        "replay_link": job.get("replay_url"),
+        "original_link": job.get("original_url"),  # alias
+        "replay_link": job.get("replay_url"),      # alias
         "ai_probability": job.get("result", {}).get("ai_probability"),
         "file_name": Path(job.get("file", "")).name,
     }
 
 @app.get("/jobs/{job_id}/approve")
 def approve_job(job_id: str, sig: str):
-    """
-    Admin clicks secure link → run heavy pipeline → mark APPROVED.
-    Ensures both original_url and replay_url are public /media links.
-    """
     if not _verify_sig(job_id, sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
     job = PENDING_JOBS.get(job_id)
@@ -347,36 +388,31 @@ def approve_job(job_id: str, sig: str):
 
     src_path = job["file"]
 
-    # (A) Run your orchestrator (Drive, Gmail, Notion, etc) – best-effort
+    # Orchestrator (best-effort)
     try:
-        portia_result = run_through_portia(src_path)
-        job["portia_result"] = portia_result
+        job["portia_result"] = run_through_portia(src_path)
     except Exception:
-        print("Portia pipeline after approval failed:", traceback.format_exc())
+        print("Portia pipeline failed:", traceback.format_exc())
         job["portia_result"] = {"error": "portia_failed"}
 
-    # (B) Build a replay and copy it into ./output for public serving
-    replay_tmp = None
+    # Build replay and expose via /media
     replay_public_filename = f"replay_{job_id}.mp4"
     replay_public_path = OUTPUT_DIR / replay_public_filename
     try:
-        replay_tmp = run_reality_replay(src_path)  # returns a tmp file path
-        # copy to ./output so it is served at /media
-        shutil.copyfile(replay_tmp, replay_public_path)
-        replay_url = _public_media_url(replay_public_filename)
+        replay_tmp = run_reality_replay(src_path)  # may equal src_path in fallback
+        if replay_tmp != str(replay_public_path):
+            shutil.copyfile(replay_tmp, replay_public_path)
+        job["replay_url"] = _public_media_url(replay_public_filename)
     except Exception:
         print("Replay generation/copy failed:", traceback.format_exc())
-        replay_url = None
+        job["replay_url"] = None
 
-    job["replay_url"] = replay_url
     job["status"] = "APPROVED"
     job["approved"] = True
-
     return {"ok": True, "job_id": job_id, "status": "APPROVED"}
 
 @app.get("/jobs/{job_id}/deny")
 def deny_job(job_id: str, sig: str):
-    """Admin denies → mark DENIED. (We do not run heavy pipeline.)"""
     if not _verify_sig(job_id, sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
     job = PENDING_JOBS.get(job_id)
@@ -388,34 +424,29 @@ def deny_job(job_id: str, sig: str):
 
 @app.get("/admin/jobs")
 def list_jobs(request: Request):
-    """Admin listing endpoint (requires x-admin-key header)."""
     if request.headers.get("x-admin-key") != ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid admin key")
     return PENDING_JOBS
 
 @app.post("/reality-replay")
 async def reality_replay(file: UploadFile = File(...)):
-    # refuse images here
     if (file.content_type or "").startswith("image/") or any(
-        file.filename.lower().endswith(e) for e in IMAGE_EXTS
+        (file.filename or "").lower().endswith(e) for e in IMAGE_EXTS
     ):
         raise HTTPException(status_code=400, detail="Reality Replay is only for videos.")
 
-    # Save uploaded video temporarily
-    temp_path = f"/tmp/{file.filename}"
+    temp_path = f"/tmp/{file.filename or 'upload.mp4'}"
     with open(temp_path, "wb") as f:
         f.write(await file.read())
 
-    # extra safety
     if not _is_video(temp_path):
         try: os.remove(temp_path)
         except Exception: pass
         raise HTTPException(status_code=400, detail="Provided file is not a video.")
 
-    # Run replay pipeline
     restored_path = run_reality_replay(temp_path)
     return FileResponse(restored_path, filename="reconstructed.mp4")
 
-# Run
+# Local dev:
 if __name__ == "__main__":
     uvicorn.run("deepfake_detection_agent.app:app", host="0.0.0.0", port=PORT, reload=True)
