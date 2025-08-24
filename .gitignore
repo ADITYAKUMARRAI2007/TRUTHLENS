@@ -21,3 +21,11 @@ media/
 .env
 .env.*
 .vscode/
+.venv/
+venv/
+node_modules/
+.DS_Store
+output/
+media/
+__pycache__/
+*.pyc
