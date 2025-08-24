@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+.venv/
+venv/
+ENV/
+*.egg-info/
+*.egg
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp/
+.pnp.js
+
+# VSCode
+.vscode/
+.DS_Store
+
+# Output / media
+output/
+media/
+samples/
+temp/
+*.mp4
+*.mkv
+*.webm
+*.avi
+
+# Other
+*.log
