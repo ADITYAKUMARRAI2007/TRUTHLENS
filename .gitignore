@@ -31,3 +31,6 @@ temp/
 *.webm
 *.avi
 *.mov
+
+# build output
+deepfake_detection_agent/frontend/dist/
