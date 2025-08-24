@@ -1,7 +1,7 @@
 # deepfake_detection_agent/app.py
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, aiofiles, base64, json, traceback, mimetypes, hmac, hashlib, time, shutil
 from typing import Optional, Set
@@ -286,96 +286,86 @@ def _public_media_url(filename: str) -> str:
 @app.post("/analyze")
 async def analyze(file: UploadFile = File(...)):
     """
-    Flow:
-      1) Stream upload to ./output (served at /media).
-      2) Enforce MAX_UPLOAD_MB (413 if exceeded).
-      3) Run detection immediately.
-      4) (Optional) email admin with Approve/Deny links (if Gmail configured).
-      5) Return { job_id, status: "PENDING", prelim scores }.
+    1) Save upload to ./output
+    2) Run detection
+    3) Email admin (best-effort)
+    4) Always return JSON (never raise 500)
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     job_id = str(int(time.time() * 1000))
     safe_name = f"{job_id}_{Path(file.filename or 'upload').name}"
     public_path = OUTPUT_DIR / safe_name
 
-    # stream to disk, and enforce size limit
-    bytes_written = 0
-    limit_bytes = MAX_UPLOAD_MB * 1024 * 1024
-    async with aiofiles.open(public_path, "wb") as f:
-        async for chunk in file.stream(1024 * 1024):
-            bytes_written += len(chunk)
-            if bytes_written > limit_bytes:
-                await f.flush()
-                try: os.remove(public_path)
-                except Exception: pass
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"File too large. Max {MAX_UPLOAD_MB} MB allowed.",
-                )
-            await f.write(chunk)
+    try:
+        async with aiofiles.open(public_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                await f.write(chunk)
+    except Exception as e:
+        # I/O failure – report but don't 500
+        print("Upload write failed:", traceback.format_exc())
+        return JSONResponse({"ok": False, "error": f"upload_failed: {e.__class__.__name__}"}, status_code=200)
 
     try:
-        detection = detect_ai_content(str(public_path))
-        status = detection.get("result", "Unknown")
-        original_url = _public_media_url(safe_name)
-
-        preview_link = None
-        if _drive_available():
-            try:
-                preview_link = upload_to_drive(str(public_path), DRIVE_FOLDER_ID)
-            except Exception:
-                preview_link = None
-
-        PENDING_JOBS[job_id] = {
-            "status": "PENDING",
-            "approved": False,
-            "file": str(public_path),
-            "result": detection,
-            "created_at": int(time.time()),
-            "preview_link": preview_link,
-            "original_url": original_url,
-            "replay_url": None,
-        }
-
-        # optional email to admin
-        try:
-            if _gmail_available() and ADMIN_EMAIL:
-                sig = _sign_job(job_id)
-                approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
-                deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
-                color = _color(status)
-                html = f"""
-                <div style="font-family:system-ui,sans-serif">
-                  <h2>New Submission Pending Review</h2>
-                  <p><b>Filename:</b> {Path(public_path).name}</p>
-                  <p><b>Preliminary Result:</b> <span style="color:{color}">{status}</span></p>
-                  <pre style="background:#0b1020;color:#cbd5e1;padding:12px;border-radius:8px">{json.dumps(detection, indent=2)}</pre>
-                  <p><a href="{original_url}">Local preview</a>{(' — <a href="'+preview_link+'">Drive preview</a>') if preview_link else ''}</p>
-                  <p>
-                    <a href="{approve_url}">✅ Approve</a> &nbsp;&nbsp;
-                    <a href="{deny_url}">❌ Deny</a>
-                  </p>
-                </div>
-                """
-                send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
-        except Exception:
-            print("Admin email send failed:", traceback.format_exc())
-
-        return {
-            "ok": True,
-            "job_id": job_id,
-            "status": "PENDING",
-            "message": "Sent to admin for approval.",
-            "prelim_result": detection.get("result"),
-            "ai_probability": detection.get("ai_probability"),
-        }
-    except HTTPException:
-        raise
+        detection = detect_ai_content(str(public_path))  # must never raise (see step 2)
     except Exception:
-        print("Analyze error:", traceback.format_exc())
-        try: os.remove(public_path)
-        except Exception: pass
-        raise HTTPException(status_code=500, detail="Analyze failed")
+        # Absolute last resort: guard everything
+        print("detect_ai_content crashed:", traceback.format_exc())
+        detection = {"result": "UNKNOWN", "ai_probability": None, "error": "detect_ai_content_crashed"}
+
+    status = detection.get("result", "UNKNOWN")
+    original_url = _public_media_url(safe_name)
+
+    preview_link = None
+    if _drive_available():
+        try:
+            preview_link = upload_to_drive(str(public_path), DRIVE_FOLDER_ID)
+        except Exception:
+            preview_link = None
+
+    PENDING_JOBS[job_id] = {
+        "status": "PENDING",
+        "approved": False,
+        "file": str(public_path),
+        "result": detection,
+        "created_at": int(time.time()),
+        "preview_link": preview_link,
+        "original_url": original_url,
+        "replay_url": None,
+    }
+
+    # best-effort email (never crash)
+    try:
+        if _gmail_available() and ADMIN_EMAIL:
+            sig = _sign_job(job_id)
+            approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
+            deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
+            color = _color(status)
+            html = f"""
+            <div style="font-family:system-ui,sans-serif">
+                <h2>New Submission Pending Review</h2>
+                <p><b>Filename:</b> {Path(public_path).name}</p>
+                <p><b>Preliminary Result:</b> <span style="color:{color}">{status}</span></p>
+                <pre style="background:#0b1020;color:#e6edf3;padding:12px;border-radius:8px">{json.dumps(detection, indent=2)}</pre>
+                <p><a href="{original_url}">Local preview</a>{(' — <a href="'+preview_link+'">Drive preview</a>') if preview_link else ''}</p>
+                <p><a href="{approve_url}">✅ Approve</a> &nbsp;&nbsp; <a href="{deny_url}">❌ Deny</a></p>
+            </div>"""
+            send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
+    except Exception:
+        print("Admin email send failed:", traceback.format_exc())
+
+    # always 200 so browser never sees “Network error/CORS”
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": "PENDING",
+        "message": "Sent to admin for approval.",
+        "prelim_result": detection.get("result"),
+        "ai_probability": detection.get("ai_probability"),
+        "error": detection.get("error"),  # bubble up any internal error text for debugging
+    }
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
