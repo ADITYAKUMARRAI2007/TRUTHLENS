@@ -1,15 +1,11 @@
 [build]
   base    = "deepfake_detection_agent/frontend"
   publish = "deepfake_detection_agent/frontend/dist"
-  # If you don't have a package-lock.json, use npm install instead of ci:
-  command = "npm ci && npm run build"
+  command = "npm install && npm run build"
 
 [build.environment]
-  NODE_VERSION = "18.18.0"         # or 20.x if you need it
-  # If peer deps are cranky, uncomment this:
-  # NPM_FLAGS = "--legacy-peer-deps"
+  NODE_VERSION = "18.18.0"
 
-# SPA fallback (for Vite/React Router)
 [[redirects]]
   from = "/*"
   to   = "/index.html"
