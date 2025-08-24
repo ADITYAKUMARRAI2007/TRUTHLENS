@@ -1,0 +1,10 @@
+[build]
+  base    = "deepfake_detection_agent/frontend"
+  publish = "deepfake_detection_agent/frontend/dist"
+  command = "npm ci && npm run build"
+
+[[redirects]]
+  from = "/*"
+  to   = "/index.html"
+  status = 200
+
