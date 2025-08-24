@@ -1,3 +1,4 @@
+
 --index-url https://download.pytorch.org/whl/cpu
 --extra-index-url https://pypi.org/simple
 
@@ -5,10 +6,9 @@ fastapi
 uvicorn[standard]
 python-multipart
 pydantic
-# transformers now requires torch >= 2.6 for secure loading
 torch==2.8.0
 safetensors>=0.4.3
-transformers
+transformers>=4.45.0
 numpy
 scikit-learn
 opencv-python
@@ -17,3 +17,4 @@ moviepy
 python-dotenv
 aiofiles
 jinja2
+requests
