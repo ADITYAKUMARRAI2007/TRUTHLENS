@@ -1,5 +1,15 @@
-import sys
+# -*- coding: utf-8 -*-
+"""
+Unified AI-content detection for Images, PDFs and Video/Audio.
+
+Key fixes:
+- Lazy-load HF models on first use (no heavy work at import).
+- Force CPU + fewer threads (stable on Render free tier).
+- Prefer safetensors & low-memory options for Transformers.
+"""
+
 import os
+import sys
 import cv2
 import math
 import json
@@ -8,10 +18,18 @@ import subprocess
 from typing import Optional, Dict, Any, Set
 
 import torch
-import librosa
 import numpy as np
+import librosa
 from PIL import Image, ImageOps, ImageFile
 
+# Keep PIL robust with partial/truncated images
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+# ---------- Runtime tuning for small instances ----------
+torch.set_num_threads(1)
+DEVICE = torch.device("cpu")
+
+# ---------- Transformers (loaded lazily later) ----------
 from transformers import (
     VideoMAEImageProcessor,
     AutoModelForVideoClassification,
@@ -19,51 +37,24 @@ from transformers import (
     AutoModelForAudioClassification,
 )
 
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+# ========= Optional deps (best-effort, guarded imports) =========
+def _optional_import(modname: str):
+    try:
+        return __import__(modname)
+    except Exception:
+        return None
 
-# ========= Optional deps (best-effort) =========
-try:
-    import timm
-except Exception:
-    timm = None
+timm        = _optional_import("timm")
+c2pa        = _optional_import("c2pa")
+exifread    = _optional_import("exifread")
+iw          = _optional_import("invisible_watermark")
+noiseprint  = _optional_import("noiseprint")
+PyPDF2      = _optional_import("PyPDF2")
+pdf2img_mod = _optional_import("pdf2image")
+pytesseract = _optional_import("pytesseract")
+convert_from_path = getattr(pdf2img_mod, "convert_from_path", None)
 
-try:
-    import c2pa
-except Exception:
-    c2pa = None
-
-try:
-    import invisible_watermark as iw
-except Exception:
-    iw = None
-
-try:
-    import exifread
-except Exception:
-    exifread = None
-
-try:
-    import noiseprint
-except Exception:
-    noiseprint = None
-
-# ========= Optional deps (PDF) =========
-try:
-    import PyPDF2
-except Exception:
-    PyPDF2 = None
-
-try:
-    from pdf2image import convert_from_path
-except Exception:
-    convert_from_path = None
-
-try:
-    import pytesseract
-except Exception:
-    pytesseract = None
-
-# transformers for text AI-detector (PDF)
+# transformers for text AI-detector (PDF), optional
 try:
     from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline as hf_pipeline
 except Exception:
@@ -72,28 +63,26 @@ except Exception:
 # ========= File type helpers =========
 IMAGE_EXTS: Set[str] = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
 VIDEO_EXTS: Set[str] = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
-PDF_EXTS: Set[str] = {".pdf"}
+PDF_EXTS:   Set[str] = {".pdf"}
 
-def is_image_path(path: str) -> bool:
-    return os.path.splitext(path)[1].lower() in IMAGE_EXTS
+def _ext(path: str) -> str:
+    return os.path.splitext(path)[1].lower()
 
-def is_video_path(path: str) -> bool:
-    return os.path.splitext(path)[1].lower() in VIDEO_EXTS
-
-def is_pdf_path(path: str) -> bool:
-    return os.path.splitext(path)[1].lower() in PDF_EXTS
+def is_image_path(path: str) -> bool: return _ext(path) in IMAGE_EXTS
+def is_video_path(path: str) -> bool: return _ext(path) in VIDEO_EXTS
+def is_pdf_path(path: str)   -> bool: return _ext(path) in PDF_EXTS
 
 # ========= Image detection settings =========
 IMG_MODEL       = os.getenv("IMAGE_MODEL", "fatformer").lower()   # "fatformer" | "effb4"
-FATFORMER_CKPT  = os.getenv("FATFORMER_CKPT")  # path to real AIGC/Deepfake ckpt (optional)
-EFFB4_CKPT      = os.getenv("EFFB4_CKPT")      # path to real AIGC/Deepfake ckpt (optional)
-USE_NOISEPRINT  = os.getenv("USE_NOISEPRINT", "0") == "1"         # default OFF for stability
+FATFORMER_CKPT  = os.getenv("FATFORMER_CKPT")  # optional path
+EFFB4_CKPT      = os.getenv("EFFB4_CKPT")      # optional path
+USE_NOISEPRINT  = os.getenv("USE_NOISEPRINT", "0") == "1"
 USE_C2PA        = os.getenv("USE_C2PA", "0") == "1"
 USE_SD_WM       = os.getenv("USE_SD_WATERMARK", "0") == "1"
 
 # ========= PDF detection settings =========
 PDF_DETECTOR_MODEL_NAME = os.getenv("PDF_TEXT_DETECTOR", "roberta-base-openai-detector")
-_pdf_detector = None  # lazy-loaded pipeline
+_pdf_detector = None  # lazy pipeline
 
 # ========= Helpers: images =========
 def _load_image(path: str) -> Image.Image:
@@ -111,7 +100,7 @@ def _exif_features(path: str) -> Dict[str, Any]:
             tags = exifread.process_file(f, details=False)
         make  = str(tags.get("Image Make", "") or "").strip()
         model = str(tags.get("Image Model", "") or "").strip()
-        out["camera_make"] = make or None
+        out["camera_make"]  = make or None
         out["camera_model"] = model or None
         out["has_camera_tags"] = bool(make or model)
     except Exception:
@@ -133,7 +122,7 @@ def _sd_watermark_present(img: Image.Image) -> Optional[bool]:
     try:
         arr = np.array(img)
         try:
-            pred = iw.decode(arr)  # API differs by version; best-effort
+            pred = iw.decode(arr)  # API varies by version
             return bool(pred)
         except Exception:
             return None
@@ -163,10 +152,10 @@ _eff_model = None
 def _prep(img: Image.Image, size=384):
     img = ImageOps.fit(img, (size, size))
     arr = np.array(img).astype("float32") / 255.0
-    mean = np.array([0.485, 0.456, 0.406])[None,None,:]
-    std  = np.array([0.229, 0.224, 0.225])[None,None,:]
+    mean = np.array([0.485, 0.456, 0.406])[None, None, :]
+    std  = np.array([0.229, 0.224, 0.225])[None, None, :]
     arr = (arr - mean) / std
-    return torch.from_numpy(arr).permute(2,0,1).unsqueeze(0)
+    return torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
 
 def _load_fatformer():
     global _fat_model
@@ -175,7 +164,7 @@ def _load_fatformer():
     try:
         model = timm.create_model("vit_base_patch16_384", pretrained=False, num_classes=1)
         if FATFORMER_CKPT and os.path.isfile(FATFORMER_CKPT):
-            state = torch.load(FATFORMER_CKPT, map_location="cpu")
+            state = torch.load(FATFORMER_CKPT, map_location="cpu", weights_only=True)
             model.load_state_dict(state, strict=False)
         model.eval()
         _fat_model = model
@@ -190,7 +179,7 @@ def _load_effb4():
     try:
         model = timm.create_model("efficientnet_b4", pretrained=False, num_classes=1)
         if EFFB4_CKPT and os.path.isfile(EFFB4_CKPT):
-            state = torch.load(EFFB4_CKPT, map_location="cpu")
+            state = torch.load(EFFB4_CKPT, map_location="cpu", weights_only=True)
             model.load_state_dict(state, strict=False)
         _eff_model = model.eval()
     except Exception:
@@ -304,17 +293,23 @@ def _analyze_pdf_metadata(meta: Dict[str, Any]) -> list:
 
     return issues
 
+_pdf_pipeline_cache = None
 def _load_pdf_ai_pipeline():
-    global _pdf_detector
-    if _pdf_detector is not None:
-        return _pdf_detector
+    global _pdf_pipeline_cache
+    if _pdf_pipeline_cache is not None:
+        return _pdf_pipeline_cache
     if hf_pipeline is None:
         return None
     try:
         tok = AutoTokenizer.from_pretrained(PDF_DETECTOR_MODEL_NAME)
-        mdl = AutoModelForSequenceClassification.from_pretrained(PDF_DETECTOR_MODEL_NAME)
-        _pdf_detector = hf_pipeline("text-classification", model=mdl, tokenizer=tok)
-        return _pdf_detector
+        mdl = AutoModelForSequenceClassification.from_pretrained(
+            PDF_DETECTOR_MODEL_NAME,
+            use_safetensors=True,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32,
+        )
+        _pdf_pipeline_cache = hf_pipeline("text-classification", model=mdl, tokenizer=tok)
+        return _pdf_pipeline_cache
     except Exception:
         return None
 
@@ -328,23 +323,19 @@ def _pdf_text_ai_scores(text: str) -> Dict[str, Any]:
         return {"fake_prob": None, "chunks": []}
 
     chunks = [text[i:i+800] for i in range(0, len(text), 800)]
-    results = []
-    fake_probs = []
+    results, fake_probs = [], []
 
     for ch in chunks:
         try:
             out = det(ch)[0]  # {'label': ..., 'score': ...}
             label = str(out.get("label", "")).lower()
             score = float(out.get("score", 0.0))
-
-            # Map labels to fake-prob
             if "fake" in label or "generated" in label or label.endswith("1"):
                 p_fake = score
             elif "real" in label or "human" in label or label.endswith("0"):
                 p_fake = 1.0 - score
             else:
                 p_fake = 0.5
-
             results.append({"label": out.get("label"), "score": score, "p_fake": p_fake})
             fake_probs.append(p_fake)
         except Exception:
@@ -366,8 +357,7 @@ def detect_pdf_fake(file_path: str) -> Dict[str, Any]:
 
     p_fake = scores["fake_prob"]
     if p_fake is None:
-        label = "UNCERTAIN"
-        p_out = 0.5
+        label, p_out = "UNCERTAIN", 0.5
     else:
         if p_fake >= 0.75:
             label = "FAKE"
@@ -387,23 +377,48 @@ def detect_pdf_fake(file_path: str) -> Dict[str, Any]:
         },
     }
 
-# ========= Video/Audio pipeline =========
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
+# ========= Video/Audio models (lazy) =========
 VIDEO_MODEL_ID = "muneeb1812/videomae-base-fake-video-classification"
-video_processor = VideoMAEImageProcessor.from_pretrained(VIDEO_MODEL_ID)
-video_model = AutoModelForVideoClassification.from_pretrained(VIDEO_MODEL_ID).to(DEVICE).eval()
-
 AUDIO_MODEL_ID = "MelodyMachine/Deepfake-audio-detection-V2"
-audio_extractor = AutoFeatureExtractor.from_pretrained(AUDIO_MODEL_ID)
-audio_model = AutoModelForAudioClassification.from_pretrained(AUDIO_MODEL_ID).to(DEVICE).eval()
+
+_video_bundle = {"processor": None, "model": None}
+_audio_bundle = {"extractor": None, "model": None}
+
+def _ensure_video_bundle():
+    if _video_bundle["processor"] is None or _video_bundle["model"] is None:
+        proc = VideoMAEImageProcessor.from_pretrained(VIDEO_MODEL_ID)
+        mdl  = AutoModelForVideoClassification.from_pretrained(
+            VIDEO_MODEL_ID,
+            use_safetensors=True,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32,
+        ).to(DEVICE).eval()
+        _video_bundle["processor"] = proc
+        _video_bundle["model"]    = mdl
+    return _video_bundle["processor"], _video_bundle["model"]
+
+def _ensure_audio_bundle():
+    if _audio_bundle["extractor"] is None or _audio_bundle["model"] is None:
+        ext = AutoFeatureExtractor.from_pretrained(AUDIO_MODEL_ID)
+        mdl = AutoModelForAudioClassification.from_pretrained(
+            AUDIO_MODEL_ID,
+            use_safetensors=True,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float32,
+        ).to(DEVICE).eval()
+        _audio_bundle["extractor"] = ext
+        _audio_bundle["model"]     = mdl
+    return _audio_bundle["extractor"], _audio_bundle["model"]
 
 print("✅ detection.py loaded")
 
+# ========= Video & audio inference =========
+@torch.inference_mode()
 def predict_video_fake(video_path: str, clip_len: int = 16) -> float:
+    video_processor, video_model = _ensure_video_bundle()
+
     cap = cv2.VideoCapture(video_path)
-    frames = []
-    scores = []
+    frames, scores = [], []
 
     while True:
         ret, frame = cap.read()
@@ -414,9 +429,8 @@ def predict_video_fake(video_path: str, clip_len: int = 16) -> float:
 
         if len(frames) == clip_len:
             inputs = video_processor(frames, return_tensors="pt").to(DEVICE)
-            with torch.no_grad():
-                logits = video_model(**inputs).logits
-                probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+            logits = video_model(**inputs).logits
+            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
             scores.append(probs[1])  # class 1 = AI-generated
             frames = []
 
@@ -458,6 +472,7 @@ def extract_audio(video_path: str, sr: int = 16000):
         print("⚠️ extract_audio failed (non-fatal):", e)
         return None, sr
 
+@torch.inference_mode()
 def predict_audio_fake(video_path: str) -> Optional[float]:
     try:
         y, sr = extract_audio(video_path, sr=16000)
@@ -465,13 +480,14 @@ def predict_audio_fake(video_path: str) -> Optional[float]:
         print("⚠️ Audio load failed:", e)
         return None
 
-    if y is None or (hasattr(y, "size") and y.size < sr):
+    if y is None or (hasattr(y, "size") and getattr(y, "size", 0) < sr):
         return None
 
+    audio_extractor, audio_model = _ensure_audio_bundle()
+
     inputs = audio_extractor(y, sampling_rate=sr, return_tensors="pt", padding=True).to(DEVICE)
-    with torch.no_grad():
-        logits = audio_model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
+    logits = audio_model(**inputs).logits
+    probs = torch.softmax(logits, dim=-1).cpu().numpy()[0]
 
     fake_idx = [k for k, v in audio_model.config.id2label.items() if "fake" in v.lower()]
     fake_idx = fake_idx[0] if fake_idx else 1
@@ -484,6 +500,7 @@ def fuse_predictions(video_path, video_score: float, audio_score: Optional[float
     if audio_score is None:
         final_score = video_score
     else:
+        # favor voice authenticity to fight lip-swap artifacts
         final_score = 0.3 * video_score + 0.7 * (1 - audio_score)
 
     if final_score > 0.7:
@@ -501,7 +518,7 @@ def fuse_predictions(video_path, video_score: float, audio_score: Optional[float
         print(f"Final Score: {final_score:.4f}")
         print(f"Scores → Video AI: {video_score:.4f}, Audio AI: {audio_score:.4f}")
     print(f"Result: {label}")
-    return label, float(final_score)   # <-- CHANGED: return the fused probability
+    return label, float(final_score)
 
 # ========= Unified entrypoint =========
 def detect_ai_content(path: str) -> dict:
@@ -523,7 +540,7 @@ def detect_ai_content(path: str) -> dict:
                 "video_score": None,
                 "audio_score": None,
                 "image_score": p,
-                "ai_probability": p,              # for UI confidence
+                "ai_probability": p,
                 "signals": r.get("signals", {}),
             }
         except Exception as e:
@@ -549,12 +566,12 @@ def detect_ai_content(path: str) -> dict:
     # Video/Audio pathway
     video_score = predict_video_fake(path)
     audio_score = predict_audio_fake(path)
-    label, final_score = fuse_predictions(path, video_score, audio_score)  # <-- CHANGED
+    label, final_score = fuse_predictions(path, video_score, audio_score)
     return {
         "result": label,        # 'REAL' | 'FAKE' | 'UNCERTAIN'
         "video_score": float(video_score) if video_score is not None else None,
         "audio_score": float(audio_score) if audio_score is not None else None,
-        "ai_probability": float(final_score),  # <-- CHANGED: send unified probability
+        "ai_probability": float(final_score),
     }
 
 # ========= CLI =========
@@ -562,4 +579,4 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python -m backend.services.detection <media_path>")
         sys.exit(1)
-    detect_ai_content(sys.argv[1])
+    print(json.dumps(detect_ai_content(sys.argv[1]), indent=2))

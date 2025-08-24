@@ -1,10 +1,10 @@
-# Backend (AI Agent + Deepfake Detection)
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi
 uvicorn[standard]
 python-multipart
 pydantic
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.3.1+cpu
+torch==2.8.0
+safetensors>=0.4.3
 transformers
 numpy
 scikit-learn
@@ -13,5 +13,4 @@ librosa
 moviepy
 python-dotenv
 aiofiles
-# Frontend (optional if you want to serve frontend via Python)
 jinja2
