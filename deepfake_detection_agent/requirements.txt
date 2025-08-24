@@ -1,0 +1,16 @@
+# Backend (AI Agent + Deepfake Detection)
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+torch
+transformers
+numpy
+scikit-learn
+opencv-python
+librosa
+moviepy
+python-dotenv
+aiofiles
+# Frontend (optional if you want to serve frontend via Python)
+jinja2
