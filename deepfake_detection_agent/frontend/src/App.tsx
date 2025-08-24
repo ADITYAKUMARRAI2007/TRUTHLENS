@@ -1,4 +1,4 @@
-// src/App.tsx
+// deepfake_detection_agent/frontend/src/App.tsx
 import React, { useState } from 'react';
 import Sidebar from './components/Sidebar';
 import AnimatedBackground from './components/AnimatedBackground';
@@ -11,18 +11,20 @@ export interface DetectionResult {
   fileName: string;
   fileType: 'video' | 'audio' | 'document' | 'code';
   explanation: string;
-  approved?: boolean;          // gate UI until admin approves
-  originalUrl?: string;        // filled after approval from server
-  replayUrl?: string;          // filled after approval from server
+  approved?: boolean;
+  originalUrl?: string;
+  replayUrl?: string;
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8001';
+// DO NOT put "VITE_API_BASE=..." inside code.
+// Set it via Netlify env or .env files.
+// Fallback to localhost for dev.
+const API_BASE = (import.meta.env.VITE_API_BASE as string) ?? 'http://127.0.0.1:8001';
 
-// robust file-type detection (handles PDFs and images reliably)
+// simple type detection
 function detectFileType(file: File): DetectionResult['fileType'] {
   const mt = (file.type || '').toLowerCase();
   const name = (file.name || '').toLowerCase();
-
   if (mt.startsWith('video/')) return 'video';
   if (mt.startsWith('audio/')) return 'audio';
   if (mt.startsWith('image/')) return 'document';
@@ -35,12 +37,22 @@ function App() {
   const [detectionResult, setDetectionResult] = useState<DetectionResult | null>(null);
   const [isAnimationMode, setIsAnimationMode] = useState(true);
   const [isDetecting, setIsDetecting] = useState(false);
-
-  // store job id from /analyze so ResultsSection can poll /jobs/{id}
   const [jobId, setJobId] = useState<string | null>(null);
+
+  // ping backend to wake Render cold start & confirm CORS
+  const prePing = async () => {
+    try {
+      const r = await fetch(`${API_BASE}/health`, { method: 'GET', mode: 'cors' });
+      // helpful during debugging
+      console.log('Health:', r.status, await r.text());
+    } catch (e) {
+      console.warn('Health ping failed:', e);
+    }
+  };
 
   const handleFileUpload = async (file: File) => {
     setIsDetecting(true);
+    await prePing(); // wake Render before big upload
 
     try {
       const formData = new FormData();
@@ -49,54 +61,44 @@ function App() {
       const response = await fetch(`${API_BASE}/analyze`, {
         method: 'POST',
         body: formData,
+        // no credentials needed; CORS is handled server-side
       });
-      if (!response.ok) throw new Error(`Failed to analyze file: ${response.statusText}`);
+
+      if (!response.ok) {
+        const t = await response.text().catch(() => '');
+        console.error('Analyze failed:', response.status, t);
+        throw new Error(`Analyze failed: ${response.status} ${t}`);
+      }
 
       const data = await response.json();
 
-      // Backend returns: { ok, job_id, status:"PENDING", prelim_result, ... }
       const jid = (data && data.job_id) ? String(data.job_id) : '';
       if (!jid) throw new Error('Missing job_id in analyze response');
       setJobId(jid);
 
-      // prefer explicit result if present; otherwise prelim
       const prelimStatus: DetectionResult['status'] =
         (data?.result as any) ||
         (data?.prelim_result as any) ||
         'UNCERTAIN';
 
-      // confidence: avoid NaN contamination from Number(undefined)
-      const rawScores = [
-        data?.ai_probability,
-        data?.final_score,
-        data?.video_score,
-        data?.image_score,
-      ].map(x => (typeof x === 'number' ? x : undefined));
-
-      const firstScore = rawScores.find(v => typeof v === 'number');
-      const confidencePct = Number.isFinite(firstScore as number)
-        ? Math.round((firstScore as number) * 100)
-        : 0;
-
-      const explanation =
-        'Awaiting admin approval. Once approved, the full report (links, replay, logs) will unlock here.';
+      const scores = [data?.ai_probability, data?.final_score, data?.video_score, data?.image_score]
+        .filter((x: any) => typeof x === 'number') as number[];
+      const conf = scores.length ? Math.round(scores[0] * 100) : 0;
 
       const baseResult: DetectionResult = {
         status: prelimStatus,
-        confidence: confidencePct,
+        confidence: conf,
         fileName: file.name,
         fileType: detectFileType(file),
-        explanation,
+        explanation: 'Awaiting admin approval. Once approved, full report will unlock.',
         approved: false,
-        originalUrl: undefined, // server will provide after approval
-        replayUrl: undefined,   // server will provide after approval
       };
 
       setDetectionResult(baseResult);
       setIsAnimationMode(true);
-    } catch (err) {
+    } catch (err: any) {
       console.error('File upload failed:', err);
-      alert('Failed to analyze file. Check backend is running.');
+      alert(`Failed to analyze file.\nAPI_BASE=${API_BASE}\n${err?.message ?? err}`);
     } finally {
       setIsDetecting(false);
     }
@@ -110,7 +112,6 @@ function App() {
   return (
     <div className="min-h-screen bg-black text-white overflow-hidden relative">
       <AnimatedBackground />
-
       <div className="relative z-10 flex">
         <Sidebar
           currentPage={currentPage}
@@ -133,6 +134,7 @@ function App() {
               <p className="text-gray-300 text-lg">
                 Spot the fakes before they fool you. Built by humans, powered by AI 🤖
               </p>
+              <p className="text-xs text-gray-400 mt-2">API_BASE: {API_BASE}</p>
             </header>
 
             {!detectionResult ? (
@@ -142,8 +144,7 @@ function App() {
                 result={detectionResult}
                 isAnimationMode={isAnimationMode}
                 onNewDetection={handleNewDetection}
-                // pass job id + api base so ResultsSection can poll /jobs/{id}
-                jobId={jobId ?? ''}                 // prevents `/jobs/undefined`
+                jobId={jobId ?? ''}
                 apiBase={API_BASE}
                 onApprovedRefresh={(merged) => setDetectionResult(merged)}
               />
