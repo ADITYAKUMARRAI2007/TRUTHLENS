@@ -1,7 +1,7 @@
 # deepfake_detection_agent/app.py
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, aiofiles, base64, json, traceback, mimetypes, hmac, hashlib, time, shutil
 from typing import Optional, Set
@@ -12,19 +12,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---- detection / replay (soft-optional for replay) ----
+# ---- detection (always) ----
 from deepfake_detection_agent.backend.services.detection import detect_ai_content
 
+# ---- replay (soft optional; we provide a fallback so it never crashes) ----
 try:
-    # If you really have this file, it will be used; otherwise we provide a fallback below.
     from deepfake_detection_agent.backend.services.reality_replay import run_reality_replay  # type: ignore
 except Exception:
     def run_reality_replay(video_path: str) -> str:
-        """Fallback: just return the original path if replay module isn’t available."""
         return video_path
 
-# ---- Google / Notion SDKs are optional at runtime ----
-# We guard imports so Render build/start won’t fail if you didn’t include them.
+# ---- optional deps; guard imports so deploys never crash ----
 try:
     import requests
 except Exception:
@@ -41,7 +39,7 @@ except Exception:
     MediaFileUpload = None  # type: ignore
     MIMEText = None     # type: ignore
 
-# ---- Portia orchestrator (optional) ----
+# ---- optional orchestrator ----
 try:
     from deepfake_detection_agent.portia_agent import run_through_portia  # type: ignore
 except Exception:
@@ -51,28 +49,30 @@ except Exception:
 # =================== Config ===================
 PORT = int(os.getenv("PORT", "8001"))
 
-# Frontend CORS origin; default to * if not set (easier while iterating)
-FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN")
-ALLOW_ORIGINS = [FRONTEND_ORIGIN] if FRONTEND_ORIGIN else ["*"]
+# Frontend origin(s). You can set multiple, comma-separated:
+# FRONTEND_ORIGIN="https://chainbreaker.netlify.app, http://localhost:5173"
+origins_env = os.getenv("FRONTEND_ORIGIN", "")
+ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()] or ["*"]
 
-# Gmail OAuth
+# Max upload size (MB). Default 50 MB to be Render-friendly.
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
+
+# Gmail OAuth (optional)
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN")
 GMAIL_SENDER = os.getenv("GMAIL_SENDER")
 
-# Drive OAuth
+# Drive OAuth (optional)
 DRIVE_REFRESH_TOKEN = os.getenv("DRIVE_REFRESH_TOKEN")
 DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
 
-# Notion
+# Notion (optional)
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-# Owner email
+# Owner/admin & HIL
 OWNER_EMAIL = os.getenv("OWNER_EMAIL", GMAIL_SENDER or "")
-
-# Human-in-the-loop envs
 APP_SECRET = os.getenv("APP_SECRET", "dev-secret-change-me")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", OWNER_EMAIL)
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "dev-admin-key")
@@ -101,16 +101,11 @@ def _is_video(path: str) -> bool:
     return (mt or "").startswith("video/")
 
 # =================== FastAPI ===================
-# =================== FastAPI ===================
-app = FastAPI(title="Deepfake Detection API (Portia-powered + HIL)", version="3.2")
-
-# Allow one or more origins (comma-separated), or "*" to allow all (hackathon mode)
-origins_env = os.getenv("FRONTEND_ORIGIN", "")
-ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()] or ["*"]
+app = FastAPI(title="TruthLens API (HIL + CORS + lazy models)", version="3.3")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,      # e.g. ["https://chainbreaker.netlify.app", "http://localhost:5173"] or ["*"]
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -123,6 +118,14 @@ app.mount("/media", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="me
 @app.get("/")
 def root():
     return {"message": "TruthLens API is running 🚀"}
+
+@app.get("/config")
+def config():
+    return {
+        "allowed_origins": ALLOWED_ORIGINS,
+        "max_upload_mb": MAX_UPLOAD_MB,
+        "public_base_url": PUBLIC_BASE_URL,
+    }
 
 @app.get("/health")
 def health():
@@ -284,22 +287,31 @@ def _public_media_url(filename: str) -> str:
 async def analyze(file: UploadFile = File(...)):
     """
     Flow:
-      1) Save upload under ./output (served at /media).
-      2) Run detection immediately.
-      3) (Optional) Email ADMIN with Approve/Deny links (if Gmail configured).
-      4) Return job_id with PENDING status for admin action.
+      1) Stream upload to ./output (served at /media).
+      2) Enforce MAX_UPLOAD_MB (413 if exceeded).
+      3) Run detection immediately.
+      4) (Optional) email admin with Approve/Deny links (if Gmail configured).
+      5) Return { job_id, status: "PENDING", prelim scores }.
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     job_id = str(int(time.time() * 1000))
     safe_name = f"{job_id}_{Path(file.filename or 'upload').name}"
     public_path = OUTPUT_DIR / safe_name
 
+    # stream to disk, and enforce size limit
+    bytes_written = 0
+    limit_bytes = MAX_UPLOAD_MB * 1024 * 1024
     async with aiofiles.open(public_path, "wb") as f:
-        # stream to disk to avoid RAM spikes
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
+        async for chunk in file.stream(1024 * 1024):
+            bytes_written += len(chunk)
+            if bytes_written > limit_bytes:
+                await f.flush()
+                try: os.remove(public_path)
+                except Exception: pass
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"File too large. Max {MAX_UPLOAD_MB} MB allowed.",
+                )
             await f.write(chunk)
 
     try:
@@ -325,7 +337,7 @@ async def analyze(file: UploadFile = File(...)):
             "replay_url": None,
         }
 
-        # email admin if Gmail configured
+        # optional email to admin
         try:
             if _gmail_available() and ADMIN_EMAIL:
                 sig = _sign_job(job_id)
@@ -337,7 +349,7 @@ async def analyze(file: UploadFile = File(...)):
                   <h2>New Submission Pending Review</h2>
                   <p><b>Filename:</b> {Path(public_path).name}</p>
                   <p><b>Preliminary Result:</b> <span style="color:{color}">{status}</span></p>
-                  <pre style="background:#f6f8fa;padding:12px;border-radius:8px">{json.dumps(detection, indent=2)}</pre>
+                  <pre style="background:#0b1020;color:#cbd5e1;padding:12px;border-radius:8px">{json.dumps(detection, indent=2)}</pre>
                   <p><a href="{original_url}">Local preview</a>{(' — <a href="'+preview_link+'">Drive preview</a>') if preview_link else ''}</p>
                   <p>
                     <a href="{approve_url}">✅ Approve</a> &nbsp;&nbsp;
@@ -357,9 +369,11 @@ async def analyze(file: UploadFile = File(...)):
             "prelim_result": detection.get("result"),
             "ai_probability": detection.get("ai_probability"),
         }
+    except HTTPException:
+        raise
     except Exception:
         print("Analyze error:", traceback.format_exc())
-        try: public_path.unlink(missing_ok=True)
+        try: os.remove(public_path)
         except Exception: pass
         raise HTTPException(status_code=500, detail="Analyze failed")
 
@@ -394,14 +408,14 @@ def approve_job(job_id: str, sig: str):
 
     src_path = job["file"]
 
-    # Orchestrator (best-effort)
+    # orchestrator (best-effort)
     try:
         job["portia_result"] = run_through_portia(src_path)
     except Exception:
         print("Portia pipeline failed:", traceback.format_exc())
         job["portia_result"] = {"error": "portia_failed"}
 
-    # Build replay and expose via /media
+    # replay -> expose via /media
     replay_public_filename = f"replay_{job_id}.mp4"
     replay_public_path = OUTPUT_DIR / replay_public_filename
     try:
@@ -436,14 +450,16 @@ def list_jobs(request: Request):
 
 @app.post("/reality-replay")
 async def reality_replay(file: UploadFile = File(...)):
+    # refuse images here
     if (file.content_type or "").startswith("image/") or any(
         (file.filename or "").lower().endswith(e) for e in IMAGE_EXTS
     ):
         raise HTTPException(status_code=400, detail="Reality Replay is only for videos.")
 
     temp_path = f"/tmp/{file.filename or 'upload.mp4'}"
-    with open(temp_path, "wb") as f:
-        f.write(await file.read())
+    async with aiofiles.open(temp_path, "wb") as f:
+        async for chunk in file.stream(1024 * 1024):
+            await f.write(chunk)
 
     if not _is_video(temp_path):
         try: os.remove(temp_path)
