@@ -34,3 +34,7 @@ temp/
 
 # build output
 deepfake_detection_agent/frontend/dist/
+
+# keep frontend secrets out of git
+.deepfake_detection_agent/frontend/.env*
+
