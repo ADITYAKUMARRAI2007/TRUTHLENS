@@ -3,8 +3,11 @@
   publish = "deepfake_detection_agent/frontend/dist"
   command = "npm ci && npm run build"
 
+[build.environment]
+  NODE_VERSION = "18.18.0" # or your required Node version
+
+# Single Page App fallback (important for React Router / Vite)
 [[redirects]]
   from = "/*"
   to   = "/index.html"
   status = 200
-
