@@ -1,6 +1,7 @@
+# netlify.toml (repo root)
 [build]
   base    = "deepfake_detection_agent/frontend"
-  publish = "deepfake_detection_agent/frontend/dist"
+  publish = "dist"
   command = "npm install && npm run build"
 
 [build.environment]
