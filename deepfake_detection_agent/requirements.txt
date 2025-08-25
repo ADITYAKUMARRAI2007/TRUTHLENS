@@ -35,3 +35,6 @@ requests
 # Portia Integration
 openai>=1.0.0
 anthropic
+
+# Gemini Integration
+google-generativeai

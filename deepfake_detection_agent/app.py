@@ -14,6 +14,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("truthlens")
 
+# Load API keys first for availability checks
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+PORTIA_API_KEY = os.getenv("PORTIA_API_KEY")
+
 # ---- detection / replay (soft-optional for replay) ----
 try:
     from backend.services.detection import detect_ai_content
@@ -92,10 +96,18 @@ except Exception as e:
 # ---- Portia Integration ----
 try:
     from portia_agent import run_through_portia
-    PORTIA_AVAILABLE = True
+    PORTIA_AVAILABLE = bool(PORTIA_API_KEY)  # Check if API key is available
 except Exception as e:
     logger.warning(f"Portia integration not available: {e}")
     PORTIA_AVAILABLE = False
+
+# ---- Gemini Integration ----
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = bool(GOOGLE_API_KEY)  # Check if API key is available
+except Exception as e:
+    logger.warning(f"Gemini integration not available: {e}")
+    GEMINI_AVAILABLE = False
 
 # =================== Config ===================
 PORT = int(os.getenv("PORT", "8001"))
@@ -108,6 +120,8 @@ logger.info(f"GMAIL_SENDER: {os.getenv('GMAIL_SENDER')}")
 logger.info(f"GOOGLE_CLIENT_ID: {os.getenv('GOOGLE_CLIENT_ID')[:20] if os.getenv('GOOGLE_CLIENT_ID') else 'None'}...")
 logger.info(f"GOOGLE_CLIENT_SECRET: {os.getenv('GOOGLE_CLIENT_SECRET')[:10] if os.getenv('GOOGLE_CLIENT_SECRET') else 'None'}...")
 logger.info(f"GMAIL_REFRESH_TOKEN: {os.getenv('GMAIL_REFRESH_TOKEN')[:20] if os.getenv('GMAIL_REFRESH_TOKEN') else 'None'}...")
+logger.info(f"GOOGLE_API_KEY: {bool(GOOGLE_API_KEY)}")
+logger.info(f"PORTIA_API_KEY: {bool(PORTIA_API_KEY)}")
 
 # CORS: explicit list or regex
 origins_env = os.getenv("FRONTEND_ORIGIN", "")
@@ -509,7 +523,7 @@ def health():
         "drive_env_ready": _drive_available(),
         "notion_env_ready": notion_test(),
         "portia_ready": PORTIA_AVAILABLE,
-        "gemini_ready": False,  # Not implemented yet
+        "gemini_ready": GEMINI_AVAILABLE,
         "admin_email_set": bool(ADMIN_EMAIL),
         "app_secret_set": APP_SECRET != "dev-secret-change-me",
     }
