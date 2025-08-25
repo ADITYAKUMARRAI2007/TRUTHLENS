@@ -59,9 +59,43 @@ try:
 except Exception:
     requests = None  # type: ignore
 
-# Email functionality completely removed
+# ---- Gmail Integration ----
+try:
+    from email.mime.text import MIMEText
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseUpload
+    import io
+    GMAIL_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"Gmail integration not available: {e}")
+    GMAIL_AVAILABLE = False
 
-# All external integrations removed
+# ---- Google Drive Integration ----
+try:
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaFileUpload
+    DRIVE_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"Google Drive integration not available: {e}")
+    DRIVE_AVAILABLE = False
+
+# ---- Notion Integration ----
+try:
+    import requests
+    NOTION_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"Notion integration not available: {e}")
+    NOTION_AVAILABLE = False
+
+# ---- Portia Integration ----
+try:
+    from portia_agent import run_through_portia
+    PORTIA_AVAILABLE = True
+except Exception as e:
+    logger.warning(f"Portia integration not available: {e}")
+    PORTIA_AVAILABLE = False
 
 # =================== Config ===================
 PORT = int(os.getenv("PORT", "8001"))
@@ -77,13 +111,25 @@ if not ALLOWED_ORIGINS and not ALLOWED_ORIGIN_REGEX:
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
-# Email functionality completely removed
+# Gmail Configuration
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN")
+GMAIL_SENDER = os.getenv("GMAIL_SENDER")
+OWNER_EMAIL = os.getenv("OWNER_EMAIL")
 
-# All external integrations removed
+# Google Drive Configuration
+DRIVE_REFRESH_TOKEN = os.getenv("DRIVE_REFRESH_TOKEN")
+DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
+
+# Notion Configuration
+NOTION_API_KEY = os.getenv("NOTION_API_KEY")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+NOTION_VERSION = "2022-06-28"
 
 # Admin
 APP_SECRET = os.getenv("APP_SECRET", "dev-secret-change-me")
-# Admin email removed
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "dev-admin-key")
 
 # Prefer Render external URL so media/email links are correct
@@ -113,6 +159,227 @@ def _is_video(path: str) -> bool:
         return True
     mt, _ = mimetypes.guess_type(str(path))
     return (mt or "").startswith("video/")
+
+# =================== External Integration Helpers ===================
+
+# ---- Gmail Helpers ----
+def _gmail_available() -> bool:
+    return (GMAIL_AVAILABLE and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and 
+            GMAIL_REFRESH_TOKEN and GMAIL_SENDER and OWNER_EMAIL)
+
+def _gmail_creds() -> Optional[Credentials]:
+    if not _gmail_available():
+        return None
+    try:
+        return Credentials(
+            token=None,
+            refresh_token=GMAIL_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            scopes=["https://www.googleapis.com/auth/gmail.send"]
+        )
+    except Exception as e:
+        logger.error(f"Gmail credentials failed: {e}")
+        return None
+
+def send_gmail(subject: str, body: str, to_email: str = None) -> bool:
+    """Send email via Gmail API"""
+    if not _gmail_available():
+        logger.warning("Gmail not configured")
+        return False
+    
+    try:
+        creds = _gmail_creds()
+        if not creds:
+            return False
+        
+        service = build("gmail", "v1", credentials=creds)
+        
+        message = MIMEText(body)
+        message["to"] = to_email or OWNER_EMAIL
+        message["from"] = GMAIL_SENDER
+        message["subject"] = subject
+        
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+        
+        service.users().messages().send(userId="me", body={"raw": raw_message}).execute()
+        logger.info(f"Gmail sent: {subject} to {to_email or OWNER_EMAIL}")
+        return True
+    except Exception as e:
+        logger.error(f"Gmail send failed: {e}")
+        return False
+
+# ---- Google Drive Helpers ----
+def _drive_available() -> bool:
+    return (DRIVE_AVAILABLE and DRIVE_REFRESH_TOKEN and DRIVE_FOLDER_ID and
+            GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET)
+
+def _drive_creds() -> Optional[Credentials]:
+    if not _drive_available():
+        return None
+    try:
+        return Credentials(
+            token=None,
+            refresh_token=DRIVE_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            scopes=["https://www.googleapis.com/auth/drive.file"]
+        )
+    except Exception as e:
+        logger.error(f"Drive credentials failed: {e}")
+        return None
+
+def upload_to_drive(file_path: str, filename: str = None) -> Optional[str]:
+    """Upload file to Google Drive and return shareable link"""
+    if not _drive_available():
+        logger.warning("Google Drive not configured")
+        return None
+    
+    try:
+        creds = _drive_creds()
+        if not creds:
+            return None
+        
+        service = build("drive", "v3", credentials=creds)
+        
+        file_metadata = {
+            "name": filename or Path(file_path).name,
+            "parents": [DRIVE_FOLDER_ID]
+        }
+        
+        media = MediaFileUpload(file_path, resumable=True)
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id,webViewLink"
+        ).execute()
+        
+        logger.info(f"Drive upload: {file_path} -> {file.get('webViewLink')}")
+        return file.get("webViewLink")
+    except Exception as e:
+        logger.error(f"Drive upload failed: {e}")
+        return None
+
+# ---- Notion Helpers ----
+def _notion_headers() -> dict:
+    return {
+        "Authorization": f"Bearer {NOTION_API_KEY}",
+        "Content-Type": "application/json",
+        "Notion-Version": NOTION_VERSION
+    }
+
+def notion_schema() -> dict:
+    """Get Notion database schema"""
+    if not (NOTION_AVAILABLE and NOTION_API_KEY and NOTION_DATABASE_ID):
+        return {}
+    
+    try:
+        response = requests.get(
+            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}",
+            headers=_notion_headers()
+        )
+        if response.status_code == 200:
+            return response.json()
+        else:
+            logger.error(f"Notion schema failed: {response.status_code}")
+            return {}
+    except Exception as e:
+        logger.error(f"Notion schema error: {e}")
+        return {}
+
+def notion_test() -> bool:
+    """Test Notion connection"""
+    if not (NOTION_AVAILABLE and NOTION_API_KEY and NOTION_DATABASE_ID):
+        return False
+    
+    try:
+        response = requests.get(
+            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}",
+            headers=_notion_headers()
+        )
+        return response.status_code == 200
+    except Exception as e:
+        logger.error(f"Notion test failed: {e}")
+        return False
+
+def add_to_notion(job_data: dict) -> bool:
+    """Add job to Notion database"""
+    if not (NOTION_AVAILABLE and NOTION_API_KEY and NOTION_DATABASE_ID):
+        logger.warning("Notion not configured")
+        return False
+    
+    try:
+        payload = {
+            "parent": {"database_id": NOTION_DATABASE_ID},
+            "properties": {
+                "Job ID": {"title": [{"text": {"content": job_data.get("job_id", "Unknown")}}]},
+                "Status": {"select": {"name": job_data.get("status", "Unknown")}},
+                "Result": {"select": {"name": job_data.get("result", {}).get("result", "Unknown")}},
+                "AI Probability": {"number": job_data.get("ai_probability", 0)},
+                "Upload Time": {"date": {"start": job_data.get("upload_time", "")}},
+                "File Type": {"select": {"name": job_data.get("file_type", "Unknown")}}
+            }
+        }
+        
+        response = requests.post(
+            "https://api.notion.com/v1/pages",
+            headers=_notion_headers(),
+            json=payload
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"Notion entry added for job {job_data.get('job_id')}")
+            return True
+        else:
+            logger.error(f"Notion add failed: {response.status_code}")
+            return False
+    except Exception as e:
+        logger.error(f"Notion add error: {e}")
+        return False
+
+# ---- Notification Helpers ----
+def send_simple_notification(job_data: dict) -> None:
+    """Log notification to console/file for manual review"""
+    logger.info("=== ADMIN REVIEW REQUIRED ===")
+    logger.info(f"Job ID: {job_data.get('job_id')}")
+    logger.info(f"Status: {job_data.get('status')}")
+    logger.info(f"Result: {job_data.get('result', {}).get('result', 'Unknown')}")
+    logger.info(f"AI Probability: {job_data.get('ai_probability', 0)}")
+    logger.info(f"File: {job_data.get('file', 'Unknown')}")
+    logger.info(f"Upload Time: {job_data.get('upload_time', 'Unknown')}")
+    logger.info("=== END ADMIN REVIEW ===")
+
+def send_webhook_notification(job_data: dict) -> bool:
+    """Send notification via webhook (Discord/Slack)"""
+    webhook_url = os.getenv("WEBHOOK_URL")
+    if not (webhook_url and requests):
+        return False
+    
+    try:
+        result = job_data.get("result", {}).get("result", "Unknown")
+        ai_prob = job_data.get("ai_probability", 0)
+        color = _color(result)
+        
+        payload = {
+            "embeds": [{
+                "title": f"🔍 TruthLens Analysis Complete",
+                "description": f"**Job ID:** {job_data.get('job_id')}\n**Result:** {result}\n**AI Probability:** {ai_prob:.2%}",
+                "color": int(color.replace("#", ""), 16),
+                "fields": [
+                    {"name": "File", "value": job_data.get('file', 'Unknown'), "inline": True},
+                    {"name": "Upload Time", "value": job_data.get('upload_time', 'Unknown'), "inline": True}
+                ],
+                "footer": {"text": "TruthLens AI Detection System"}
+            }]
+        }
+        
+        response = requests.post(webhook_url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        logger.error(f"Webhook notification failed: {e}")
+        return False
 
 # =================== FastAPI ===================
 app = FastAPI(title="TruthLens API (HIL + Background + CORS)", version="3.8")
@@ -166,17 +433,31 @@ def warmup():
 @app.get("/health")
 def health():
     integrations = {
-        "gmail_env_ready": False,
-        "drive_env_ready": False,
-        "notion_env_ready": False,
-        "portia_ready": False,
-        "gemini_ready": False,
-        "admin_email_set": False,
+        "gmail_env_ready": _gmail_available(),
+        "drive_env_ready": _drive_available(),
+        "notion_env_ready": notion_test(),
+        "portia_ready": PORTIA_AVAILABLE,
+        "gemini_ready": False,  # Not implemented yet
+        "admin_email_set": bool(ADMIN_EMAIL),
         "app_secret_set": APP_SECRET != "dev-secret-change-me",
     }
     return {"ok": True, **integrations}
 
-# Email functionality completely removed
+@app.get("/debug/email")
+def debug_email():
+    """Test email functionality"""
+    if not _gmail_available():
+        return {"ok": False, "error": "Gmail not configured"}
+    
+    try:
+        success = send_gmail(
+            "TruthLens Test Email",
+            "This is a test email from TruthLens to verify Gmail integration is working.",
+            ADMIN_EMAIL
+        )
+        return {"ok": success, "message": "Test email sent" if success else "Failed to send email"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 @app.get("/debug/notification")
 def debug_notification():
@@ -198,7 +479,7 @@ def debug_notification():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# All external integrations removed
+# External integrations restored and functional
 
 # =================== HIL / Jobs ===================
 PENDING_JOBS = {}  # {job_id: {...}}
@@ -247,6 +528,17 @@ def _load_job(job_id: str):
 # ---------- background workers ----------
 def _process_job(job_id: str, public_path: Path):
     logger.info("BG start: detection for job %s", job_id)
+    
+    # Run Portia analysis first if available
+    portia_result = None
+    if PORTIA_AVAILABLE:
+        try:
+            portia_result = run_through_portia(str(public_path))
+            logger.info("Portia analysis completed for job %s", job_id)
+        except Exception as e:
+            logger.warning("Portia analysis failed for job %s: %s", job_id, str(e))
+    
+    # Run AI detection
     try:
         detection = detect_ai_content(str(public_path))
         logger.info("BG done: detection for job %s -> %s", job_id, detection)
@@ -268,6 +560,8 @@ def _process_job(job_id: str, public_path: Path):
     job["ai_probability"] = detection.get("ai_probability")
     job["status"] = "APPROVED"  # Auto-approve after detection
     job["approved"] = True
+    job["portia_result"] = portia_result
+    
     # optional convenience copies (if the detector exposes them)
     if "video_score" in detection:
         job["video_score"] = detection["video_score"]
@@ -304,6 +598,64 @@ def _process_job(job_id: str, public_path: Path):
         except Exception as fallback_error:
             logger.error("All replay generation failed for job %s: %s", job_id, str(fallback_error))
             job["replay_url"] = None
+
+    # Upload to Google Drive if available
+    drive_link = None
+    if _drive_available():
+        try:
+            drive_link = upload_to_drive(str(public_path), f"truthlens_{job_id}_{Path(public_path).name}")
+            job["drive_link"] = drive_link
+            logger.info("Drive upload completed for job %s", job_id)
+        except Exception as e:
+            logger.warning("Drive upload failed for job %s: %s", job_id, str(e))
+
+    # Add to Notion if available
+    if notion_test():
+        try:
+            add_to_notion(job)
+            logger.info("Notion entry added for job %s", job_id)
+        except Exception as e:
+            logger.warning("Notion add failed for job %s: %s", job_id, str(e))
+
+    # Send notifications
+    try:
+        # Send email notification
+        if _gmail_available() and ADMIN_EMAIL:
+            subject = f"TruthLens Analysis Complete - Job {job_id}"
+            result = detection.get("result", "Unknown")
+            ai_prob = detection.get("ai_probability", 0)
+            
+            body = f"""
+TruthLens Analysis Complete
+
+Job ID: {job_id}
+Result: {result}
+AI Probability: {ai_prob:.2%}
+File: {job.get('file', 'Unknown')}
+Upload Time: {job.get('upload_time', 'Unknown')}
+
+Analysis Details:
+- Video Score: {detection.get('video_score', 'N/A')}
+- Audio Score: {detection.get('audio_score', 'N/A')}
+- Image Score: {detection.get('image_score', 'N/A')}
+
+Replay URL: {job.get('replay_url', 'Not available')}
+Drive Link: {drive_link or 'Not available'}
+
+This is an automated notification from TruthLens.
+            """
+            
+            send_gmail(subject, body.strip(), ADMIN_EMAIL)
+            logger.info("Email notification sent for job %s", job_id)
+        
+        # Send webhook notification
+        send_webhook_notification(job)
+        
+        # Log for manual review
+        send_simple_notification(job)
+        
+    except Exception as e:
+        logger.error("Notification failed for job %s: %s", job_id, str(e))
 
     _save_job(job_id)
 
@@ -494,7 +846,65 @@ def approve_job(job_id: str, sig: str):
 
     src_path = job["file"]
 
-    # All external integrations removed
+    # Run external integrations if available
+    try:
+        # Run Portia analysis if available
+        if PORTIA_AVAILABLE:
+            try:
+                portia_result = run_through_portia(src_path)
+                job["portia_result"] = portia_result
+                logger.info("Portia analysis completed for job %s", job_id)
+            except Exception as e:
+                logger.warning("Portia analysis failed for job %s: %s", job_id, str(e))
+        
+        # Upload to Google Drive if available
+        if _drive_available():
+            try:
+                drive_link = upload_to_drive(src_path, f"truthlens_{job_id}_{Path(src_path).name}")
+                job["drive_link"] = drive_link
+                logger.info("Drive upload completed for job %s", job_id)
+            except Exception as e:
+                logger.warning("Drive upload failed for job %s: %s", job_id, str(e))
+        
+        # Add to Notion if available
+        if notion_test():
+            try:
+                add_to_notion(job)
+                logger.info("Notion entry added for job %s", job_id)
+            except Exception as e:
+                logger.warning("Notion add failed for job %s: %s", job_id, str(e))
+        
+        # Send email notification if available
+        if _gmail_available() and ADMIN_EMAIL:
+            try:
+                subject = f"TruthLens Job Approved - Job {job_id}"
+                result = job.get("result", {}).get("result", "Unknown")
+                ai_prob = job.get("result", {}).get("ai_probability", 0)
+                
+                body = f"""
+TruthLens Job Approved
+
+Job ID: {job_id}
+Result: {result}
+AI Probability: {ai_prob:.2%}
+File: {job.get('file', 'Unknown')}
+Upload Time: {job.get('upload_time', 'Unknown')}
+
+Drive Link: {job.get('drive_link', 'Not available')}
+
+This job has been approved and is ready for review.
+                """
+                
+                send_gmail(subject, body.strip(), ADMIN_EMAIL)
+                logger.info("Approval email sent for job %s", job_id)
+            except Exception as e:
+                logger.warning("Approval email failed for job %s: %s", job_id, str(e))
+        
+        # Send webhook notification
+        send_webhook_notification(job)
+        
+    except Exception as e:
+        logger.error("External integrations failed for job %s: %s", job_id, str(e))
 
     # APPROVE IMMEDIATELY
     job["status"] = "APPROVED"

@@ -2,3 +2,18 @@ opencv-python
 numpy
 ffmpeg-python
 typing_extensions
+
+# AI Detection Dependencies
+torch
+torchvision
+transformers
+librosa
+Pillow
+timm
+c2pa
+exifread
+invisible-watermark
+noiseprint
+PyPDF2
+pdf2image
+pytesseract

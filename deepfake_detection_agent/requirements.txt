@@ -8,3 +8,37 @@ python-dotenv
 aiofiles
 requests
 ffmpeg-python
+
+# AI Detection Dependencies
+torch
+torchvision
+transformers
+librosa
+Pillow
+timm
+c2pa
+exifread
+invisible-watermark
+noiseprint
+PyPDF2
+pdf2image
+pytesseract
+
+# Gmail Integration
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+
+# Google Drive Integration
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+
+# Notion Integration
+requests
+
+# Portia Integration
+openai>=1.0.0
+anthropic
