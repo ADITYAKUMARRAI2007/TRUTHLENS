@@ -6,6 +6,7 @@
 
 [build.environment]
   NODE_VERSION = "20"
+  VITE_API_BASE = "https://truthlens-ispk.onrender.com"
 
 [[redirects]]
   from = "/*"

@@ -5,8 +5,10 @@ services:
     env: python
     plan: free
     region: oregon
-    buildCommand: pip install -r deepfake_detection_agent/requirements.txt
-    startCommand: uvicorn deepfake_detection_agent.app:app --host 0.0.0.0 --port $PORT
+    buildCommand: |
+      pip install -r deepfake_detection_agent/requirements.txt
+      pip install -r deepfake_detection_agent/backend/requirements.txt
+    startCommand: cd deepfake_detection_agent && python start_production.py
     autoDeploy: true
     envVars:
       - key: PYTHON_VERSION
@@ -14,7 +16,17 @@ services:
       - key: HF_HOME
         value: /opt/render/project/.cache/huggingface
       - key: FRONTEND_ORIGIN
-        value: https://your-netlify-site.netlify.app   # <-- replace later
+        value: https://your-netlify-site.netlify.app
+      - key: MAX_UPLOAD_MB
+        value: "100"
+      - key: APP_SECRET
+        value: "render-production-secret-2024"
+      - key: TL_FAST_MODE
+        value: "1"
+      - key: TL_TARGET_MAX_W
+        value: "960"
+      - key: TL_TARGET_FPS
+        value: "15"
     disk:
       name: hf-cache
       mountPath: /opt/render/project/.cache

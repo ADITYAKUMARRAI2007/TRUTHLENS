@@ -1,7 +1,8 @@
 ffmpeg
-poppler-utils
-libgl1
-libglib2.0-0
 libsm6
 libxext6
-libxrender1
+libxrender-dev
+libgomp1
+libglib2.0-0
+libgl1-mesa-glx
+libgtk-3-0

@@ -15,9 +15,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("truthlens")
 
 # ---- detection / replay (soft-optional for replay) ----
-from deepfake_detection_agent.backend.services.detection import detect_ai_content
+from backend.services.detection import detect_ai_content
 try:
-    from deepfake_detection_agent.backend.services.detection import (
+    from backend.services.detection import (
         _ensure_video_bundle, _ensure_audio_bundle
     )
 except Exception:
@@ -25,10 +25,13 @@ except Exception:
     _ensure_audio_bundle = None
 
 try:
-    from deepfake_detection_agent.backend.services.reality_replay import run_reality_replay  # type: ignore
+    from backend.services.reality_replay import run_reality_replay  # type: ignore
 except Exception:
-    def run_reality_replay(video_path: str) -> str:
-        return video_path
+    try:
+        from backend.services.simple_replay import run_reality_replay  # type: ignore
+    except Exception:
+        def run_reality_replay(video_path: str) -> str:
+            return video_path
 
 # ---- optional deps ----
 try:
@@ -49,7 +52,7 @@ except Exception:
 
 # ---- Portia orchestrator (optional) ----
 try:
-    from deepfake_detection_agent.portia_agent import run_through_portia  # type: ignore
+    from portia_agent import run_through_portia  # type: ignore
 except Exception:
     def run_through_portia(path: str):
         return {"skipped": True, "reason": "portia_agent not available"}
@@ -530,17 +533,51 @@ def get_job(job_id: str):
         "file_name": Path(job.get("file", "")).name,
     }
 def _run_replay_and_save(job_id: str, src_path: str, replay_public_path: Path):
+    """
+    Generate replay video and save it to the public directory.
+    This runs in a background thread after job approval.
+    """
     try:
-        tmp = run_reality_replay(src_path)
-        if tmp != str(replay_public_path):
-            shutil.copyfile(tmp, replay_public_path)
-        job = _load_job(job_id)
-        if job:
-            job["replay_url"] = _public_media_url(replay_public_path.name)
-            _save_job(job_id)
-            logger.info("Replay saved for %s -> %s", job_id, job["replay_url"])
-    except Exception:
-        logger.error("Replay generation failed for %s:\n%s", job_id, traceback.format_exc())
+        logger.info("Starting replay generation for job %s", job_id)
+        
+        # Generate replay using the reality replay service
+        replay_tmp = run_reality_replay(src_path)
+        
+        # If replay generation succeeded and we got a different file
+        if replay_tmp and replay_tmp != str(replay_public_path):
+            # Copy the generated replay to our public directory
+            shutil.copyfile(replay_tmp, replay_public_path)
+            logger.info("Replay copied from %s to %s", replay_tmp, replay_public_path)
+            
+            # Update the job with the replay URL
+            job = _load_job(job_id)
+            if job:
+                job["replay_url"] = _public_media_url(replay_public_path.name)
+                _save_job(job_id)
+                logger.info("Replay URL saved for job %s: %s", job_id, job["replay_url"])
+        else:
+            # If replay generation failed or returned the same path, create a simple copy
+            logger.warning("Replay generation returned same path, creating copy for job %s", job_id)
+            shutil.copyfile(src_path, replay_public_path)
+            
+            job = _load_job(job_id)
+            if job:
+                job["replay_url"] = _public_media_url(replay_public_path.name)
+                _save_job(job_id)
+                logger.info("Fallback replay URL saved for job %s", job_id)
+                
+    except Exception as e:
+        logger.error("Replay generation failed for job %s: %s", job_id, str(e))
+        # Try to create a fallback replay (just copy the original)
+        try:
+            shutil.copyfile(src_path, replay_public_path)
+            job = _load_job(job_id)
+            if job:
+                job["replay_url"] = _public_media_url(replay_public_path.name)
+                _save_job(job_id)
+                logger.info("Fallback replay created for job %s after error", job_id)
+        except Exception as fallback_error:
+            logger.error("Fallback replay also failed for job %s: %s", job_id, str(fallback_error))
 @app.get("/jobs/{job_id}/approve")
 def approve_job(job_id: str, sig: str):
     if not _verify_sig(job_id, sig):

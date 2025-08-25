@@ -4,7 +4,7 @@ import Sidebar from './components/Sidebar';
 import AnimatedBackground from './components/AnimatedBackground';
 import UploadSection from './components/UploadSection';
 import ResultsSection from './components/ResultsSection';
-import { API_BASE } from './api'; 
+
 export interface DetectionResult {
   status: 'REAL' | 'FAKE' | 'UNCERTAIN';
   confidence: number;          // 0..100
@@ -19,7 +19,7 @@ export interface DetectionResult {
 // DO NOT put "VITE_API_BASE=..." inside code.
 // Set it via Netlify env or .env files.
 // Fallback to localhost for dev.
-const API_BASE = (import.meta.env.VITE_API_BASE as string) ?? 'http://127.0.0.1:8001';
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8001';
 
 // simple type detection
 function detectFileType(file: File): DetectionResult['fileType'] {
