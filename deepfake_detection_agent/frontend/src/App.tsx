@@ -18,8 +18,8 @@ export interface DetectionResult {
 
 // DO NOT put "VITE_API_BASE=..." inside code.
 // Set it via Netlify env or .env files.
-// Fallback to localhost for dev.
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8001';
+// Fallback to production Render URL.
+const API_BASE = import.meta.env.VITE_API_BASE || 'https://truthlens-ispk.onrender.com';
 
 // simple type detection
 function detectFileType(file: File): DetectionResult['fileType'] {
