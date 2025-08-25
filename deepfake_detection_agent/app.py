@@ -226,40 +226,25 @@ def send_gmail(to_addr: str, subject: str, html_body: str):
     resp = service.users().messages().send(userId="me", body={"raw": raw}).execute()
     logger.info("Gmail sent to %s id=%s", to_addr, resp.get("id"))
 
-@app.get("/debug/email")
-def debug_email(to: Optional[str] = None):
+@app.get("/debug/notification")
+def debug_notification():
+    """Test notification system"""
     try:
-        dest = (to or os.getenv("ADMIN_EMAIL") or os.getenv("OWNER_EMAIL") or os.getenv("GMAIL_SENDER"))
-        if not dest:
-            return {"ok": False, "error": "no destination email configured"}
-        
-        logger.info(f"Testing email functionality to: {dest}")
-        logger.info(f"Gmail available: {_gmail_available()}")
-        logger.info(f"GMAIL_CLIENT_ID: {'SET' if GOOGLE_CLIENT_ID else 'NOT SET'}")
-        logger.info(f"GMAIL_CLIENT_SECRET: {'SET' if GOOGLE_CLIENT_SECRET else 'NOT SET'}")
-        logger.info(f"GMAIL_REFRESH_TOKEN: {'SET' if GMAIL_REFRESH_TOKEN else 'NOT SET'}")
-        logger.info(f"GMAIL_SENDER: {'SET' if GMAIL_SENDER else 'NOT SET'}")
-        
-        send_gmail(dest, "[TruthLens] Debug Email", "<p>If you see this, Gmail API is working ✅</p>")
-        return {"ok": True, "sent_to": dest, "gmail_available": _gmail_available()}
+        webhook_url = os.getenv("WEBHOOK_URL")
+        if webhook_url and requests:
+            payload = {
+                "content": "🔔 **TruthLens Notification Test**\n\nThis is a test notification from TruthLens!",
+                "username": "TruthLens Bot"
+            }
+            response = requests.post(webhook_url, json=payload, timeout=10)
+            if response.status_code == 200:
+                return {"ok": True, "message": "Webhook notification sent successfully"}
+            else:
+                return {"ok": False, "error": f"Webhook failed: {response.status_code}"}
+        else:
+            return {"ok": True, "message": "Notification system ready (webhook not configured)"}
     except Exception as e:
-        logger.error(f"Debug email failed: {e}")
-        return {"ok": False, "error": str(e), "gmail_available": _gmail_available()}
-
-@app.get("/debug/email-config")
-def debug_email_config():
-    """Check email configuration status"""
-    return {
-        "gmail_available": _gmail_available(),
-        "gmail_client_id_set": bool(GOOGLE_CLIENT_ID),
-        "gmail_client_secret_set": bool(GOOGLE_CLIENT_SECRET),
-        "gmail_refresh_token_set": bool(GMAIL_REFRESH_TOKEN),
-        "gmail_sender_set": bool(GMAIL_SENDER),
-        "admin_email": ADMIN_EMAIL,
-        "owner_email": OWNER_EMAIL,
-        "gmail_sender": GMAIL_SENDER,
-        "all_required_set": all([GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GMAIL_REFRESH_TOKEN, GMAIL_SENDER])
-    }
+        return {"ok": False, "error": str(e)}
 
 # =================== Drive helpers (optional) ===================
 def _drive_available() -> bool:
@@ -515,47 +500,17 @@ async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
     # queue background detection
     background.add_task(_process_job, job_id, public_path)
 
-    # best-effort email
+    # Simple notification without email
     try:
-        if _gmail_available() and ADMIN_EMAIL:
-            logger.info(f"Attempting to send admin email to: {ADMIN_EMAIL}")
-            sig = _sign_job(job_id)
-            approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
-            deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
-            color = _color("PROCESSING")
-            html = f"""
-            <div style="font-family:system-ui,sans-serif">
-              <h2>New Submission Pending Review</h2>
-              <p><b>Filename:</b> {Path(public_path).name}</p>
-              <p><b>Status:</b> <span style="color:{color}">PROCESSING</span></p>
-              <p><a href="{original_url}">Local preview</a></p>
-              <p>
-                <a href="{approve_url}">✅ Approve</a> &nbsp;&nbsp;
-                <a href="{deny_url}">❌ Deny</a>
-              </p>
-            </div>
-            """
-            logger.info(f"Sending email with approve URL: {approve_url}")
-            send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
-            logger.info("Admin email sent successfully")
-        else:
-            logger.warning(f"Gmail not available or ADMIN_EMAIL not set. Using webhook notification.")
-            logger.warning(f"Gmail available: {_gmail_available()}, ADMIN_EMAIL: {ADMIN_EMAIL}")
-            # Use webhook notification
-            send_webhook_notification(job_id, Path(public_path).name, original_url)
+        logger.info(f"New file uploaded: {Path(public_path).name}")
+        send_webhook_notification(job_id, Path(public_path).name, original_url)
     except Exception as e:
-        logger.error(f"Admin email send failed: {e}")
-        logger.error("Admin email send failed:\n%s", traceback.format_exc())
-        # Use webhook notification even if email fails
+        logger.error(f"Notification failed: {e}")
+        # Fallback to simple notification
         try:
-            send_webhook_notification(job_id, Path(public_path).name, original_url)
-        except Exception as fallback_error:
-            logger.error(f"Webhook notification also failed: {fallback_error}")
-            # Final fallback - simple notification
-            try:
-                send_simple_notification(job_id, Path(public_path).name, original_url)
-            except Exception as simple_error:
-                logger.error(f"All notification methods failed: {simple_error}")
+            send_simple_notification(job_id, Path(public_path).name, original_url)
+        except Exception as simple_error:
+            logger.error(f"All notification methods failed: {simple_error}")
 
     return {
         "ok": True,
