@@ -49,16 +49,7 @@ try:
 except Exception:
     requests = None  # type: ignore
 
-try:
-    from email.mime.text import MIMEText
-    from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
-except Exception:
-    Credentials = None  # type: ignore
-    build = None        # type: ignore
-    MediaFileUpload = None  # type: ignore
-    MIMEText = None     # type: ignore
+# Email functionality completely removed
 
 # ---- Portia orchestrator (optional) ----
 try:
@@ -81,11 +72,7 @@ if not ALLOWED_ORIGINS and not ALLOWED_ORIGIN_REGEX:
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
-# Gmail OAuth
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-GMAIL_REFRESH_TOKEN = os.getenv("GMAIL_REFRESH_TOKEN")
-GMAIL_SENDER = os.getenv("GMAIL_SENDER")
+# Email functionality completely removed
 
 # Drive OAuth
 DRIVE_REFRESH_TOKEN = os.getenv("DRIVE_REFRESH_TOKEN")
@@ -95,10 +82,9 @@ DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-# HIL + admin
-OWNER_EMAIL = os.getenv("OWNER_EMAIL", GMAIL_SENDER or "")
+# Admin
 APP_SECRET = os.getenv("APP_SECRET", "dev-secret-change-me")
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", OWNER_EMAIL)
+# Admin email removed
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "dev-admin-key")
 
 # Prefer Render external URL so media/email links are correct
@@ -181,50 +167,17 @@ def warmup():
 @app.get("/health")
 def health():
     integrations = {
-        "gmail_env_ready": all([GMAIL_SENDER, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GMAIL_REFRESH_TOKEN]),
-        "drive_env_ready": all([GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, DRIVE_REFRESH_TOKEN, DRIVE_FOLDER_ID]),
+        "gmail_env_ready": False,
+        "drive_env_ready": False,
         "notion_env_ready": bool(NOTION_API_KEY and NOTION_DATABASE_ID),
         "portia_ready": bool(os.getenv("PORTIA_API_KEY")),
         "gemini_ready": bool(os.getenv("GOOGLE_API_KEY")),
-        "admin_email_set": bool(ADMIN_EMAIL),
+        "admin_email_set": False,
         "app_secret_set": APP_SECRET != "dev-secret-change-me",
     }
     return {"ok": True, **integrations}
 
-# =================== Gmail helpers (optional) ===================
-TOKEN_URI = "https://oauth2.googleapis.com/token"
-
-def _gmail_available() -> bool:
-    return all([
-        GMAIL_SENDER, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GMAIL_REFRESH_TOKEN,
-        Credentials is not None, build is not None, MIMEText is not None
-    ])
-
-def _gmail_creds():
-    if not _gmail_available():
-        raise RuntimeError("Gmail not configured or google libs missing.")
-    return Credentials(  # type: ignore
-        token=None,
-        refresh_token=GMAIL_REFRESH_TOKEN,
-        token_uri=TOKEN_URI,
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET,
-        scopes=["https://www.googleapis.com/auth/gmail.send"],
-    )
-
-def send_gmail(to_addr: str, subject: str, html_body: str):
-    if not _gmail_available():
-        logger.warning("Gmail not available; skipping email")
-        return
-    creds = _gmail_creds()
-    service = build("gmail", "v1", credentials=creds)  # type: ignore
-    msg = MIMEText(html_body, "html")  # type: ignore
-    msg["to"] = to_addr
-    msg["from"] = GMAIL_SENDER
-    msg["subject"] = subject
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
-    resp = service.users().messages().send(userId="me", body={"raw": raw}).execute()
-    logger.info("Gmail sent to %s id=%s", to_addr, resp.get("id"))
+# Email functionality completely removed
 
 @app.get("/debug/notification")
 def debug_notification():
@@ -248,22 +201,10 @@ def debug_notification():
 
 # =================== Drive helpers (optional) ===================
 def _drive_available() -> bool:
-    return all([
-        GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, DRIVE_REFRESH_TOKEN,
-        build is not None, MediaFileUpload is not None, Credentials is not None
-    ])
+    return False
 
 def _drive_creds():
-    if not _drive_available():
-        raise RuntimeError("Drive not configured or google libs missing.")
-    return Credentials(  # type: ignore
-        token=None,
-        refresh_token=DRIVE_REFRESH_TOKEN,
-        token_uri=TOKEN_URI,
-        client_id=GOOGLE_CLIENT_ID,
-        client_secret=GOOGLE_CLIENT_SECRET,
-        scopes=["https://www.googleapis.com/auth/drive.file"],
-    )
+    raise RuntimeError("Drive functionality disabled")
 
 def upload_to_drive(file_path: str, folder_id: Optional[str]) -> Optional[str]:
     if not _drive_available():
