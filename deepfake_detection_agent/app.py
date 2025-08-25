@@ -362,25 +362,33 @@ def _load_job(job_id: str):
 
 # ---------- background workers ----------
 def _process_job(job_id: str, public_path: Path):
+    logger.info("BG start: detection for job %s", job_id)
     try:
         detection = detect_ai_content(str(public_path))
-    except Exception:
-        logger.error("detect_ai_content crashed:\n%s", traceback.format_exc())
-        detection = {"result": "UNKNOWN", "ai_probability": None, "error": "detect_ai_content_crashed"}
+        logger.info("BG done: detection for job %s -> %s", job_id, detection)
+    except Exception as e:
+        logger.error("detect_ai_content crashed for %s:\n%s", job_id, traceback.format_exc())
+        detection = {
+            "result": "UNKNOWN",
+            "ai_probability": None,
+            "error": f"detect_ai_content_crashed: {e.__class__.__name__}",
+        }
 
     job = _load_job(job_id)
     if not job:
+        logger.warning("BG save skipped: job %s not found", job_id)
         return
 
+    # persist fields the frontend polls
     job["result"] = detection
+    job["ai_probability"] = detection.get("ai_probability")
+    job["status"] = detection.get("result", "UNKNOWN")
+    # optional convenience copies (if the detector exposes them)
+    if "video_score" in detection:
+        job["video_score"] = detection["video_score"]
+    if "audio_score" in detection:
+        job["audio_score"] = detection["audio_score"]
 
-    # optional: drive upload
-    preview_link = None
-    try:
-        preview_link = upload_to_drive(str(public_path), DRIVE_FOLDER_ID) if _drive_available() else None
-    except Exception:
-        preview_link = None
-    job["preview_link"] = preview_link
     _save_job(job_id)
 
 def _finalize_after_approve(job_id: str):
@@ -521,26 +529,56 @@ def get_job(job_id: str):
         "ai_probability": job.get("result", {}).get("ai_probability"),
         "file_name": Path(job.get("file", "")).name,
     }
-
+def _run_replay_and_save(job_id: str, src_path: str, replay_public_path: Path):
+    try:
+        tmp = run_reality_replay(src_path)
+        if tmp != str(replay_public_path):
+            shutil.copyfile(tmp, replay_public_path)
+        job = _load_job(job_id)
+        if job:
+            job["replay_url"] = _public_media_url(replay_public_path.name)
+            _save_job(job_id)
+            logger.info("Replay saved for %s -> %s", job_id, job["replay_url"])
+    except Exception:
+        logger.error("Replay generation failed for %s:\n%s", job_id, traceback.format_exc())
 @app.get("/jobs/{job_id}/approve")
-def approve_job(job_id: str, sig: str, background: BackgroundTasks):
-    # Quick auth check
+def approve_job(job_id: str, sig: str):
     if not _verify_sig(job_id, sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
-
     job = _load_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] == "APPROVED":
+        return {"ok": True, "job_id": job_id, "status": "APPROVED"}
 
-    # Mark approved immediately (fast response)
+    src_path = job["file"]
+
+    # orchestrator (best-effort)
+    try:
+        job["portia_result"] = run_through_portia(src_path)
+    except Exception:
+        logger.error("Portia pipeline failed:\n%s", traceback.format_exc())
+        job["portia_result"] = {"error": "portia_failed"}
+
+    # APPROVE IMMEDIATELY
     job["status"] = "APPROVED"
     job["approved"] = True
-    _save_job(job_id)
+    _save_job(job_id)  # so GET /jobs/{id} starts returning data immediately
 
-    # Kick off heavy work in the background to avoid proxy timeouts
-    background.add_task(_finalize_after_approve, job_id)
+    # Now schedule replay asynchronously
+    try:
+        replay_public_filename = f"replay_{job_id}.mp4"
+        replay_public_path = OUTPUT_DIR / replay_public_filename
 
-    # Return instantly so the email link never 502s
+        import threading
+        threading.Thread(
+            target=_run_replay_and_save,
+            args=(job_id, src_path, replay_public_path),
+            daemon=True
+        ).start()
+    except Exception:
+        logger.warning("Could not schedule replay for %s", job_id)
+
     return {"ok": True, "job_id": job_id, "status": "APPROVED"}
 
 @app.get("/jobs/{job_id}/deny")
