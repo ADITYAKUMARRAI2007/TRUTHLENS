@@ -1,23 +1,10 @@
-
---index-url https://download.pytorch.org/whl/cpu
---extra-index-url https://pypi.org/simple
-
 fastapi
 uvicorn[standard]
 python-multipart
 pydantic
 numpy
-scikit-learn
 opencv-python
-librosa
-moviepy
 python-dotenv
 aiofiles
-jinja2
 requests
-gunicorn
-google-api-python-client
-google-auth
-google-auth-httplib2
 ffmpeg-python
-typing_extensions
