@@ -96,18 +96,18 @@ except Exception as e:
 # ---- Portia Integration ----
 try:
     from portia_agent import run_through_portia
-    PORTIA_AVAILABLE = bool(PORTIA_API_KEY)  # Check if API key is available
+    PORTIA_IMPORT_AVAILABLE = True
 except Exception as e:
     logger.warning(f"Portia integration not available: {e}")
-    PORTIA_AVAILABLE = False
+    PORTIA_IMPORT_AVAILABLE = False
 
 # ---- Gemini Integration ----
 try:
     import google.generativeai as genai
-    GEMINI_AVAILABLE = bool(GOOGLE_API_KEY)  # Check if API key is available
+    GEMINI_IMPORT_AVAILABLE = True
 except Exception as e:
     logger.warning(f"Gemini integration not available: {e}")
-    GEMINI_AVAILABLE = False
+    GEMINI_IMPORT_AVAILABLE = False
 
 # =================== Config ===================
 PORT = int(os.getenv("PORT", "8001"))
@@ -184,6 +184,16 @@ def _is_video(path: str) -> bool:
     return (mt or "").startswith("video/")
 
 # =================== External Integration Helpers ===================
+
+# ---- Portia Helpers ----
+def _portia_available() -> bool:
+    """Check if Portia is available (import + API key)"""
+    return PORTIA_IMPORT_AVAILABLE and bool(PORTIA_API_KEY)
+
+# ---- Gemini Helpers ----
+def _gemini_available() -> bool:
+    """Check if Gemini is available (import + API key)"""
+    return GEMINI_IMPORT_AVAILABLE and bool(GOOGLE_API_KEY)
 
 # ---- Gmail Helpers ----
 def _gmail_available() -> bool:
@@ -522,8 +532,8 @@ def health():
         "gmail_env_ready": _gmail_available(),
         "drive_env_ready": _drive_available(),
         "notion_env_ready": notion_test(),
-        "portia_ready": PORTIA_AVAILABLE,
-        "gemini_ready": GEMINI_AVAILABLE,
+        "portia_ready": _portia_available(),
+        "gemini_ready": _gemini_available(),
         "admin_email_set": bool(ADMIN_EMAIL),
         "app_secret_set": APP_SECRET != "dev-secret-change-me",
     }
@@ -678,7 +688,7 @@ def _process_job(job_id: str, public_path: Path):
     
     # Run Portia analysis first if available
     portia_result = None
-    if PORTIA_AVAILABLE:
+    if _portia_available():
         try:
             portia_result = run_through_portia(str(public_path))
             logger.info("Portia analysis completed for job %s", job_id)
@@ -1006,7 +1016,7 @@ def approve_job(job_id: str, sig: str):
     # Run external integrations if available
     try:
         # Run Portia analysis if available
-        if PORTIA_AVAILABLE:
+        if _portia_available():
             try:
                 portia_result = run_through_portia(src_path)
                 job["portia_result"] = portia_result
