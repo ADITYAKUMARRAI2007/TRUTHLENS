@@ -16,6 +16,8 @@ transformers
 librosa
 Pillow
 timm
+opencv-python-headless
+scikit-image
 
 # Gmail Integration
 google-auth
