@@ -256,7 +256,8 @@ def _process_job(job_id: str, public_path: Path):
     # persist fields the frontend polls
     job["result"] = detection
     job["ai_probability"] = detection.get("ai_probability")
-    job["status"] = detection.get("result", "UNKNOWN")
+    job["status"] = "APPROVED"  # Auto-approve after detection
+    job["approved"] = True
     # optional convenience copies (if the detector exposes them)
     if "video_score" in detection:
         job["video_score"] = detection["video_score"]
