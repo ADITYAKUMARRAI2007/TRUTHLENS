@@ -165,7 +165,7 @@ def _is_video(path: str) -> bool:
 # ---- Gmail Helpers ----
 def _gmail_available() -> bool:
     return (GMAIL_AVAILABLE and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and 
-            GMAIL_REFRESH_TOKEN and GMAIL_SENDER and OWNER_EMAIL)
+            GMAIL_REFRESH_TOKEN and GMAIL_SENDER and (ADMIN_EMAIL or OWNER_EMAIL))
 
 def _gmail_creds() -> Optional[Credentials]:
     if not _gmail_available():
@@ -210,14 +210,14 @@ def send_gmail(subject: str, body: str, to_email: str = None) -> bool:
         service = build("gmail", "v1", credentials=creds)
         
         message = MIMEText(body)
-        message["to"] = to_email or OWNER_EMAIL
+        message["to"] = to_email or ADMIN_EMAIL or OWNER_EMAIL
         message["from"] = GMAIL_SENDER
         message["subject"] = subject
         
         raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
         
         service.users().messages().send(userId="me", body={"raw": raw_message}).execute()
-        logger.info(f"Gmail sent: {subject} to {to_email or OWNER_EMAIL}")
+        logger.info(f"Gmail sent: {subject} to {to_email or ADMIN_EMAIL or OWNER_EMAIL}")
         return True
     except Exception as e:
         logger.error(f"Gmail send failed: {e}")
@@ -497,12 +497,14 @@ def debug_email():
     status = {
         "gmail_available": GMAIL_AVAILABLE,
         "admin_email_set": bool(ADMIN_EMAIL),
+        "owner_email_set": bool(OWNER_EMAIL),
         "gmail_sender_set": bool(GMAIL_SENDER),
         "google_client_id_set": bool(GOOGLE_CLIENT_ID),
         "google_client_secret_set": bool(GOOGLE_CLIENT_SECRET),
         "gmail_refresh_token_set": bool(GMAIL_REFRESH_TOKEN),
         "gmail_refresh_token_length": len(GMAIL_REFRESH_TOKEN) if GMAIL_REFRESH_TOKEN else 0,
-        "gmail_refresh_token_ascii": True
+        "gmail_refresh_token_ascii": True,
+        "gmail_available_check": _gmail_available()
     }
     
     # Check if refresh token is ASCII
@@ -521,10 +523,11 @@ def debug_email():
             if creds:
                 status["credentials_created"] = True
                 # Try to send test email
+                test_email = ADMIN_EMAIL or OWNER_EMAIL
                 success = send_gmail(
                     "TruthLens Test Email",
                     "This is a test email from TruthLens to verify Gmail integration is working.",
-                    ADMIN_EMAIL
+                    test_email
                 )
                 status["test_email_sent"] = success
                 status["message"] = "Test email sent successfully" if success else "Failed to send test email"
