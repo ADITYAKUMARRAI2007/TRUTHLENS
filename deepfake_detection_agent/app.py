@@ -1,7 +1,7 @@
 # deepfake_detection_agent/app.py
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn, os, aiofiles, base64, json, traceback, mimetypes, hmac, hashlib, time, shutil, logging
 from typing import Optional, Set
@@ -11,12 +11,11 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 load_dotenv()
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("truthlens")
 
 # ---- detection / replay (soft-optional for replay) ----
 from deepfake_detection_agent.backend.services.detection import detect_ai_content
-
-# Also import lazy warmup hooks if available (safe if not)
 try:
     from deepfake_detection_agent.backend.services.detection import (
         _ensure_video_bundle, _ensure_audio_bundle
@@ -29,10 +28,9 @@ try:
     from deepfake_detection_agent.backend.services.reality_replay import run_reality_replay  # type: ignore
 except Exception:
     def run_reality_replay(video_path: str) -> str:
-        """Fallback: just return the original path if replay module isn’t available."""
         return video_path
 
-# ---- Google / Notion SDKs optional ----
+# ---- optional deps ----
 try:
     import requests
 except Exception:
@@ -59,12 +57,16 @@ except Exception:
 # =================== Config ===================
 PORT = int(os.getenv("PORT", "8001"))
 
-# Allow comma-separated origins; fallback to "*" (hackathon mode)
+# CORS: explicit list or regex (preferred if you have Netlify preview subdomains)
 origins_env = os.getenv("FRONTEND_ORIGIN", "")
-ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()] or ["*"]
+ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()]
+ALLOWED_ORIGIN_REGEX = os.getenv("FRONTEND_ORIGIN_REGEX")  # e.g. r"^https://([a-z0-9-]+\.)?chainbreaker\.netlify\.app$"
+if not ALLOWED_ORIGINS and not ALLOWED_ORIGIN_REGEX:
+    # Safe defaults for your setup; avoid "*" when allow_credentials=True
+    ALLOWED_ORIGINS = ["https://chainbreaker.netlify.app", "http://localhost:5173"]
 
-# Max upload guard (MiB) to avoid proxy timeouts/502 on free tier
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "30"))
+# Max upload guard (MiB) to avoid proxy timeouts/502
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 # Gmail OAuth
@@ -81,10 +83,8 @@ DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-# Owner email
+# HIL + admin
 OWNER_EMAIL = os.getenv("OWNER_EMAIL", GMAIL_SENDER or "")
-
-# Human-in-the-loop envs
 APP_SECRET = os.getenv("APP_SECRET", "dev-secret-change-me")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", OWNER_EMAIL)
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "dev-admin-key")
@@ -95,7 +95,7 @@ PUBLIC_BASE_URL = os.getenv(
     os.getenv("RENDER_EXTERNAL_URL", f"http://127.0.0.1:{PORT}")
 )
 
-# Storage dir for public media
+# Storage dir
 OUTPUT_DIR = Path("./output")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -118,16 +118,19 @@ def _is_video(path: str) -> bool:
     return (mt or "").startswith("video/")
 
 # =================== FastAPI ===================
-app = FastAPI(title="Deepfake Detection API (Portia-powered + HIL)", version="3.5")
+app = FastAPI(title="TruthLens API (HIL + Background + CORS)", version="3.7")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,      # e.g. ["https://chainbreaker.netlify.app", "http://localhost:5173"] or ["*"]
+cors_kwargs = dict(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-print("CORS allow_origins:", ALLOWED_ORIGINS)
+if ALLOWED_ORIGIN_REGEX:
+    app.add_middleware(CORSMiddleware, allow_origin_regex=ALLOWED_ORIGIN_REGEX, **cors_kwargs)
+    print("CORS allow_origin_regex:", ALLOWED_ORIGIN_REGEX)
+else:
+    app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, **cors_kwargs)
+    print("CORS allow_origins:", ALLOWED_ORIGINS)
 
 # serve anything in ./output at /media/*
 app.mount("/media", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="media")
@@ -136,7 +139,16 @@ app.mount("/media", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="me
 def root():
     return {"message": "TruthLens API is running 🚀"}
 
-# Warmup endpoint to preload models after a cold start
+@app.get("/config")
+def config():
+    return {
+        "allowed_origins": ALLOWED_ORIGINS,
+        "allowed_origin_regex": ALLOWED_ORIGIN_REGEX,
+        "max_upload_mb": MAX_UPLOAD_MB,
+        "public_base_url": PUBLIC_BASE_URL,
+    }
+
+# Warmup after cold start
 @app.get("/warmup")
 def warmup():
     warmed = {"video": False, "audio": False}
@@ -190,7 +202,7 @@ def _gmail_creds():
 
 def send_gmail(to_addr: str, subject: str, html_body: str):
     if not _gmail_available():
-        print("Gmail not available; skipping email.")
+        logger.warning("Gmail not available; skipping email")
         return
     creds = _gmail_creds()
     service = build("gmail", "v1", credentials=creds)  # type: ignore
@@ -199,7 +211,19 @@ def send_gmail(to_addr: str, subject: str, html_body: str):
     msg["from"] = GMAIL_SENDER
     msg["subject"] = subject
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
-    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    resp = service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    logger.info("Gmail sent to %s id=%s", to_addr, resp.get("id"))
+
+@app.get("/debug/email")
+def debug_email(to: Optional[str] = None):
+    try:
+        dest = (to or os.getenv("ADMIN_EMAIL") or os.getenv("OWNER_EMAIL") or os.getenv("GMAIL_SENDER"))
+        if not dest:
+            return {"ok": False, "error": "no destination email configured"}
+        send_gmail(dest, "[TruthLens] Debug Email", "<p>If you see this, Gmail API is working ✅</p>")
+        return {"ok": True, "sent_to": dest}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 # =================== Drive helpers (optional) ===================
 def _drive_available() -> bool:
@@ -224,7 +248,7 @@ def upload_to_drive(file_path: str, folder_id: Optional[str]) -> Optional[str]:
     if not _drive_available():
         return None
     if not file_path or not os.path.isfile(file_path):
-        print(f"Drive upload skipped (file missing): {file_path}")
+        logger.info("Drive upload skipped (file missing): %s", file_path)
         return None
     try:
         creds = _drive_creds()
@@ -240,10 +264,10 @@ def upload_to_drive(file_path: str, folder_id: Optional[str]) -> Optional[str]:
             service.permissions().create(fileId=file_id, body={"role": "reader", "type": "anyone"}).execute()
             created = service.files().get(fileId=file_id, fields="webViewLink").execute()
         except Exception as e:
-            print("Drive permission set failed (non-fatal):", e)
+            logger.warning("Drive permission set failed (non-fatal): %s", e)
         return created.get("webViewLink")
     except Exception:
-        print("Drive upload failed:", traceback.format_exc())
+        logger.error("Drive upload failed:\n%s", traceback.format_exc())
         return None
 
 # =================== Notion helpers (optional/debug) ===================
@@ -293,7 +317,7 @@ def notion_test():
     except Exception:
         return {"error": traceback.format_exc()}
 
-# =================== Human-in-the-loop (Admin) ===================
+# =================== HIL / Jobs ===================
 PENDING_JOBS = {}  # {job_id: {...}}
 
 def _sign_job(job_id: str) -> str:
@@ -308,27 +332,49 @@ def _color(status: str) -> str:
 def _public_media_url(filename: str) -> str:
     return f"{PUBLIC_BASE_URL}/media/{filename}"
 
+# background worker
+def _process_job(job_id: str, public_path: Path):
+    try:
+        detection = detect_ai_content(str(public_path))
+    except Exception:
+        logger.error("detect_ai_content crashed:\n%s", traceback.format_exc())
+        detection = {"result": "UNKNOWN", "ai_probability": None, "error": "detect_ai_content_crashed"}
+
+    job = PENDING_JOBS.get(job_id)
+    if not job:
+        return
+
+    job["result"] = detection
+
+    # optional: drive upload
+    preview_link = None
+    try:
+        preview_link = upload_to_drive(str(public_path), DRIVE_FOLDER_ID) if _drive_available() else None
+    except Exception:
+        preview_link = None
+    job["preview_link"] = preview_link
+
 # =================== Endpoints ===================
 
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
+async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
     """
-    1) Stream upload to ./output (served at /media).
-    2) Run detection immediately.
-    3) Optionally email ADMIN with Approve/Deny links (if Gmail configured).
-    4) Return job_id with PENDING status for admin action.
+    1) Stream upload to ./output (served at /media)
+    2) Queue detection in background (prevents 502)
+    3) Best-effort email to admin
+    4) Always 200 with PENDING + job_id
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     job_id = str(int(time.time() * 1000))
     safe_name = f"{job_id}_{Path(file.filename or 'upload').name}"
     public_path = OUTPUT_DIR / safe_name
 
-    # Enforce max upload size while streaming
+    # Stream write with size guard
     written = 0
     try:
         async with aiofiles.open(public_path, "wb") as f:
             while True:
-                chunk = await file.read(1024 * 1024)  # 1 MiB
+                chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
                 written += len(chunk)
@@ -337,75 +383,62 @@ async def analyze(file: UploadFile = File(...)):
                     except Exception: pass
                     try: public_path.unlink(missing_ok=True)
                     except Exception: pass
-                    raise HTTPException(status_code=413, detail=f"File too large. Limit is {MAX_UPLOAD_MB} MB.")
+                    return JSONResponse({"ok": False, "error": f"file_too_large>{MAX_UPLOAD_MB}MB"}, status_code=200)
                 await f.write(chunk)
-    except HTTPException:
-        raise
     except Exception:
         try: public_path.unlink(missing_ok=True)
         except Exception: pass
-        raise HTTPException(status_code=400, detail="Upload failed")
+        return JSONResponse({"ok": False, "error": "upload_failed"}, status_code=200)
 
+    original_url = _public_media_url(safe_name)
+
+    # init job
+    PENDING_JOBS[job_id] = {
+        "status": "PENDING",
+        "approved": False,
+        "file": str(public_path),
+        "result": {"result": "PROCESSING"},
+        "created_at": int(time.time()),
+        "preview_link": None,
+        "original_url": original_url,
+        "replay_url": None,
+    }
+
+    # queue background detection
+    background.add_task(_process_job, job_id, public_path)
+
+    # best-effort email
     try:
-        detection = detect_ai_content(str(public_path))
-        status = detection.get("result", "Unknown")
-        original_url = _public_media_url(safe_name)
-
-        preview_link = None
-        if _drive_available():
-            try:
-                preview_link = upload_to_drive(str(public_path), DRIVE_FOLDER_ID)
-            except Exception:
-                preview_link = None
-
-        PENDING_JOBS[job_id] = {
-            "status": "PENDING",
-            "approved": False,
-            "file": str(public_path),
-            "result": detection,
-            "created_at": int(time.time()),
-            "preview_link": preview_link,
-            "original_url": original_url,
-            "replay_url": None,
-        }
-
-        # email admin if Gmail configured
-        try:
-            if _gmail_available() and ADMIN_EMAIL:
-                sig = _sign_job(job_id)
-                approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
-                deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
-                color = _color(status)
-                html = f"""
-                <div style="font-family:system-ui,sans-serif">
-                  <h2>New Submission Pending Review</h2>
-                  <p><b>Filename:</b> {Path(public_path).name}</p>
-                  <p><b>Preliminary Result:</b> <span style="color:{color}">{status}</span></p>
-                  <pre style="background:#f6f8fa;padding:12px;border-radius:8px">{json.dumps(detection, indent=2)}</pre>
-                  <p><a href="{original_url}">Local preview</a>{(' — <a href="'+preview_link+'">Drive preview</a>') if preview_link else ''}</p>
-                  <p>
-                    <a href="{approve_url}">✅ Approve</a> &nbsp;&nbsp;
-                    <a href="{deny_url}">❌ Deny</a>
-                  </p>
-                </div>
-                """
-                send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
-        except Exception:
-            print("Admin email send failed:", traceback.format_exc())
-
-        return {
-            "ok": True,
-            "job_id": job_id,
-            "status": "PENDING",
-            "message": "Sent to admin for approval.",
-            "prelim_result": detection.get("result"),
-            "ai_probability": detection.get("ai_probability"),
-        }
+        if _gmail_available() and ADMIN_EMAIL:
+            sig = _sign_job(job_id)
+            approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
+            deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
+            color = _color("PROCESSING")
+            html = f"""
+            <div style="font-family:system-ui,sans-serif">
+              <h2>New Submission Pending Review</h2>
+              <p><b>Filename:</b> {Path(public_path).name}</p>
+              <p><b>Status:</b> <span style="color:{color}">PROCESSING</span></p>
+              <p><a href="{original_url}">Local preview</a></p>
+              <p>
+                <a href="{approve_url}">✅ Approve</a> &nbsp;&nbsp;
+                <a href="{deny_url}">❌ Deny</a>
+              </p>
+            </div>
+            """
+            send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
     except Exception:
-        print("Analyze error:", traceback.format_exc())
-        try: public_path.unlink(missing_ok=True)
-        except Exception: pass
-        raise HTTPException(status_code=500, detail="Analyze failed")
+        logger.error("Admin email send failed:\n%s", traceback.format_exc())
+
+    return {
+        "ok": True,
+        "job_id": job_id,
+        "status": "PENDING",
+        "message": "Queued for analysis.",
+        "prelim_result": "PROCESSING",
+        "ai_probability": None,
+        "error": None,
+    }
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
@@ -420,8 +453,8 @@ def get_job(job_id: str):
         "result": job.get("result", {}),
         "original_url": job.get("original_url"),
         "replay_url": job.get("replay_url"),
-        "original_link": job.get("original_url"),  # alias
-        "replay_link": job.get("replay_url"),      # alias
+        "original_link": job.get("original_url"),
+        "replay_link": job.get("replay_url"),
         "ai_probability": job.get("result", {}).get("ai_probability"),
         "file_name": Path(job.get("file", "")).name,
     }
@@ -438,12 +471,14 @@ def approve_job(job_id: str, sig: str):
 
     src_path = job["file"]
 
+    # orchestrator (best-effort)
     try:
         job["portia_result"] = run_through_portia(src_path)
     except Exception:
-        print("Portia pipeline failed:", traceback.format_exc())
+        logger.error("Portia pipeline failed:\n%s", traceback.format_exc())
         job["portia_result"] = {"error": "portia_failed"}
 
+    # replay -> expose via /media
     replay_public_filename = f"replay_{job_id}.mp4"
     replay_public_path = OUTPUT_DIR / replay_public_filename
     try:
@@ -452,7 +487,7 @@ def approve_job(job_id: str, sig: str):
             shutil.copyfile(replay_tmp, replay_public_path)
         job["replay_url"] = _public_media_url(replay_public_filename)
     except Exception:
-        print("Replay generation/copy failed:", traceback.format_exc())
+        logger.error("Replay generation/copy failed:\n%s", traceback.format_exc())
         job["replay_url"] = None
 
     job["status"] = "APPROVED"
@@ -478,22 +513,35 @@ def list_jobs(request: Request):
 
 @app.post("/reality-replay")
 async def reality_replay(file: UploadFile = File(...)):
-    if (file.content_type or "").startswith("image/") or any(
-        (file.filename or "").lower().endswith(e) for e in IMAGE_EXTS
-    ):
+    filename = (file.filename or "upload").lower()
+    if (file.content_type or "").startswith("image/") or any(filename.endswith(e) for e in IMAGE_EXTS):
         raise HTTPException(status_code=400, detail="Reality Replay is only for videos.")
 
-    temp_path = f"/tmp/{file.filename or 'upload.mp4'}"
-    with open(temp_path, "wb") as f:
-        f.write(await file.read())
+    # Stream to /tmp
+    tmp_name = filename if any(filename.endswith(e) for e in VIDEO_EXTS) else "upload.mp4"
+    temp_path = f"/tmp/{tmp_name}"
+    try:
+        async with aiofiles.open(temp_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                await f.write(chunk)
+    except Exception:
+        try: os.remove(temp_path)
+        except Exception: pass
+        raise HTTPException(status_code=500, detail="Upload failed.")
 
     if not _is_video(temp_path):
         try: os.remove(temp_path)
         except Exception: pass
         raise HTTPException(status_code=400, detail="Provided file is not a video.")
 
-    restored_path = run_reality_replay(temp_path)
-    return FileResponse(restored_path, filename="reconstructed.mp4")
+    try:
+        restored_path = run_reality_replay(temp_path)
+        return FileResponse(restored_path, filename="reconstructed.mp4")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Replay failed.")
 
 # Local dev:
 if __name__ == "__main__":
