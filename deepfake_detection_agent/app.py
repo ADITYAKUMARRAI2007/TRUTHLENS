@@ -164,6 +164,16 @@ def _is_video(path: str) -> bool:
 
 # ---- Gmail Helpers ----
 def _gmail_available() -> bool:
+    # Debug logging to see what's missing
+    logger.info(f"Gmail availability check:")
+    logger.info(f"  GMAIL_AVAILABLE: {GMAIL_AVAILABLE}")
+    logger.info(f"  GOOGLE_CLIENT_ID: {bool(GOOGLE_CLIENT_ID)}")
+    logger.info(f"  GOOGLE_CLIENT_SECRET: {bool(GOOGLE_CLIENT_SECRET)}")
+    logger.info(f"  GMAIL_REFRESH_TOKEN: {bool(GMAIL_REFRESH_TOKEN)}")
+    logger.info(f"  GMAIL_SENDER: {bool(GMAIL_SENDER)}")
+    logger.info(f"  ADMIN_EMAIL: {bool(ADMIN_EMAIL)}")
+    logger.info(f"  OWNER_EMAIL: {bool(OWNER_EMAIL)}")
+    
     return (GMAIL_AVAILABLE and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and 
             GMAIL_REFRESH_TOKEN and GMAIL_SENDER and (ADMIN_EMAIL or OWNER_EMAIL))
 
@@ -497,8 +507,10 @@ def debug_email():
     status = {
         "gmail_available": GMAIL_AVAILABLE,
         "admin_email_set": bool(ADMIN_EMAIL),
+        "admin_email_value": ADMIN_EMAIL if ADMIN_EMAIL else None,
         "owner_email_set": bool(OWNER_EMAIL),
         "gmail_sender_set": bool(GMAIL_SENDER),
+        "gmail_sender_value": GMAIL_SENDER if GMAIL_SENDER else None,
         "google_client_id_set": bool(GOOGLE_CLIENT_ID),
         "google_client_secret_set": bool(GOOGLE_CLIENT_SECRET),
         "gmail_refresh_token_set": bool(GMAIL_REFRESH_TOKEN),
@@ -560,6 +572,20 @@ def debug_notification():
             return {"ok": True, "message": "Notification system ready (webhook not configured)"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+@app.get("/debug/env")
+def debug_env():
+    """Debug environment variables (safe version)"""
+    return {
+        "admin_email": ADMIN_EMAIL,
+        "gmail_sender": GMAIL_SENDER,
+        "google_client_id": GOOGLE_CLIENT_ID[:20] + "..." if GOOGLE_CLIENT_ID else None,
+        "google_client_secret": GOOGLE_CLIENT_SECRET[:10] + "..." if GOOGLE_CLIENT_SECRET else None,
+        "gmail_refresh_token": GMAIL_REFRESH_TOKEN[:20] + "..." if GMAIL_REFRESH_TOKEN else None,
+        "gmail_refresh_token_length": len(GMAIL_REFRESH_TOKEN) if GMAIL_REFRESH_TOKEN else 0,
+        "gmail_available": _gmail_available(),
+        "gmail_available_libs": GMAIL_AVAILABLE
+    }
 
 # External integrations restored and functional
 
