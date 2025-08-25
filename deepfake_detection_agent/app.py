@@ -539,18 +539,23 @@ async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
             send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
             logger.info("Admin email sent successfully")
         else:
-            logger.warning(f"Gmail not available or ADMIN_EMAIL not set. Using fallback notification.")
+            logger.warning(f"Gmail not available or ADMIN_EMAIL not set. Using webhook notification.")
             logger.warning(f"Gmail available: {_gmail_available()}, ADMIN_EMAIL: {ADMIN_EMAIL}")
-            # Use fallback notification
-            send_simple_notification(job_id, Path(public_path).name, original_url)
+            # Use webhook notification
+            send_webhook_notification(job_id, Path(public_path).name, original_url)
     except Exception as e:
         logger.error(f"Admin email send failed: {e}")
         logger.error("Admin email send failed:\n%s", traceback.format_exc())
-        # Use fallback notification even if email fails
+        # Use webhook notification even if email fails
         try:
-            send_simple_notification(job_id, Path(public_path).name, original_url)
+            send_webhook_notification(job_id, Path(public_path).name, original_url)
         except Exception as fallback_error:
-            logger.error(f"Fallback notification also failed: {fallback_error}")
+            logger.error(f"Webhook notification also failed: {fallback_error}")
+            # Final fallback - simple notification
+            try:
+                send_simple_notification(job_id, Path(public_path).name, original_url)
+            except Exception as simple_error:
+                logger.error(f"All notification methods failed: {simple_error}")
 
     return {
         "ok": True,
@@ -749,6 +754,69 @@ def send_simple_notification(job_id: str, filename: str, original_url: str):
             
     except Exception as e:
         logger.error(f"Simple notification failed: {e}")
+
+# =================== Webhook Notification System ===================
+def send_webhook_notification(job_id: str, filename: str, original_url: str):
+    """
+    Send notification via webhook (Discord, Slack, etc.) when Gmail fails.
+    This provides immediate notification without email setup.
+    """
+    try:
+        sig = _sign_job(job_id)
+        approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
+        deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
+        
+        # Create a simple notification message
+        message = f"""
+🔍 **NEW TRUTHLENS SUBMISSION REQUIRES REVIEW**
+
+📁 **File:** {filename}
+🆔 **Job ID:** {job_id}
+🔗 **Preview:** {original_url}
+
+✅ **Approve:** {approve_url}
+❌ **Deny:** {deny_url}
+
+---
+*Sent via TruthLens Webhook System*
+        """
+        
+        # Log the notification
+        logger.info("=" * 80)
+        logger.info("🔔 WEBHOOK NOTIFICATION - Admin Review Required")
+        logger.info("=" * 80)
+        logger.info(message)
+        logger.info("=" * 80)
+        
+        # You can add webhook URLs here for Discord/Slack/etc.
+        webhook_url = os.getenv("WEBHOOK_URL")
+        if webhook_url and requests:
+            try:
+                payload = {
+                    "content": message,
+                    "username": "TruthLens Bot"
+                }
+                response = requests.post(webhook_url, json=payload, timeout=10)
+                if response.status_code == 200:
+                    logger.info("Webhook notification sent successfully")
+                else:
+                    logger.warning(f"Webhook failed: {response.status_code}")
+            except Exception as e:
+                logger.error(f"Webhook error: {e}")
+        
+        # Also save to file for manual review
+        with open("pending_reviews.txt", "a") as f:
+            f.write(f"\n{'-'*60}\n")
+            f.write(f"Time: {datetime.now()}\n")
+            f.write(f"Job ID: {job_id}\n")
+            f.write(f"File: {filename}\n")
+            f.write(f"Preview: {original_url}\n")
+            f.write(f"Approve: {approve_url}\n")
+            f.write(f"Deny: {deny_url}\n")
+            f.write(f"{'-'*60}\n")
+            
+    except Exception as e:
+        logger.error(f"Webhook notification failed: {e}")
 
 # Local dev:
 if __name__ == "__main__":
