@@ -4,7 +4,7 @@ import Sidebar from './components/Sidebar';
 import AnimatedBackground from './components/AnimatedBackground';
 import UploadSection from './components/UploadSection';
 import ResultsSection from './components/ResultsSection';
-
+import { API_BASE } from './api'; 
 export interface DetectionResult {
   status: 'REAL' | 'FAKE' | 'UNCERTAIN';
   confidence: number;          // 0..100
