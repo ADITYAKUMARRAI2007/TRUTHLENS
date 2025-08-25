@@ -332,6 +332,35 @@ def _color(status: str) -> str:
 def _public_media_url(filename: str) -> str:
     return f"{PUBLIC_BASE_URL}/media/{filename}"
 
+# ---------- Disk-backed persistence for jobs (survives Render sleeps) ----------
+JOBS_DIR = OUTPUT_DIR / "jobs"
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _save_job(job_id: str) -> None:
+    try:
+        job = PENDING_JOBS.get(job_id)
+        if not job:
+            return
+        with open(JOBS_DIR / f"{job_id}.json", "w") as f:
+            json.dump(job, f)
+    except Exception:
+        logger.warning("save_job failed:\n%s", traceback.format_exc())
+
+def _load_job(job_id: str):
+    j = PENDING_JOBS.get(job_id)
+    if j:
+        return j
+    path = JOBS_DIR / f"{job_id}.json"
+    if path.exists():
+        try:
+            with open(path) as f:
+                j = json.load(f)
+            PENDING_JOBS[job_id] = j  # rehydrate in-memory cache
+            return j
+        except Exception:
+            logger.warning("load_job failed:\n%s", traceback.format_exc())
+    return None
+
 # background worker
 def _process_job(job_id: str, public_path: Path):
     try:
@@ -340,7 +369,7 @@ def _process_job(job_id: str, public_path: Path):
         logger.error("detect_ai_content crashed:\n%s", traceback.format_exc())
         detection = {"result": "UNKNOWN", "ai_probability": None, "error": "detect_ai_content_crashed"}
 
-    job = PENDING_JOBS.get(job_id)
+    job = _load_job(job_id)
     if not job:
         return
 
@@ -353,6 +382,7 @@ def _process_job(job_id: str, public_path: Path):
     except Exception:
         preview_link = None
     job["preview_link"] = preview_link
+    _save_job(job_id)
 
 # =================== Endpoints ===================
 
@@ -403,6 +433,7 @@ async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
         "original_url": original_url,
         "replay_url": None,
     }
+    _save_job(job_id)
 
     # queue background detection
     background.add_task(_process_job, job_id, public_path)
@@ -442,7 +473,7 @@ async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
-    job = PENDING_JOBS.get(job_id)
+    job = _load_job(job_id)
     if not job or job["status"] != "APPROVED":
         raise HTTPException(status_code=404, detail="Not found")
     return {
@@ -463,7 +494,7 @@ def get_job(job_id: str):
 def approve_job(job_id: str, sig: str):
     if not _verify_sig(job_id, sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
-    job = PENDING_JOBS.get(job_id)
+    job = _load_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job["status"] == "APPROVED":
@@ -492,17 +523,19 @@ def approve_job(job_id: str, sig: str):
 
     job["status"] = "APPROVED"
     job["approved"] = True
+    _save_job(job_id)
     return {"ok": True, "job_id": job_id, "status": "APPROVED"}
 
 @app.get("/jobs/{job_id}/deny")
 def deny_job(job_id: str, sig: str):
     if not _verify_sig(job_id, sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
-    job = PENDING_JOBS.get(job_id)
+    job = _load_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     job["status"] = "DENIED"
     job["approved"] = False
+    _save_job(job_id)
     return {"ok": True, "job_id": job_id, "status": "DENIED"}
 
 @app.get("/admin/jobs")
