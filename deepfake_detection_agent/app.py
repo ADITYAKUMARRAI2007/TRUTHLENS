@@ -170,6 +170,19 @@ def _gmail_available() -> bool:
 def _gmail_creds() -> Optional[Credentials]:
     if not _gmail_available():
         return None
+    
+    # Check for corrupted tokens
+    if not GMAIL_REFRESH_TOKEN or len(GMAIL_REFRESH_TOKEN) < 50:
+        logger.error("Gmail refresh token is missing or too short")
+        return None
+    
+    # Check for non-ASCII characters in token (corruption indicator)
+    try:
+        GMAIL_REFRESH_TOKEN.encode('ascii')
+    except UnicodeEncodeError:
+        logger.error("Gmail refresh token contains non-ASCII characters - likely corrupted")
+        return None
+    
     try:
         return Credentials(
             token=None,
@@ -218,6 +231,19 @@ def _drive_available() -> bool:
 def _drive_creds() -> Optional[Credentials]:
     if not _drive_available():
         return None
+    
+    # Check for corrupted tokens
+    if not DRIVE_REFRESH_TOKEN or len(DRIVE_REFRESH_TOKEN) < 50:
+        logger.error("Drive refresh token is missing or too short")
+        return None
+    
+    # Check for non-ASCII characters in token (corruption indicator)
+    try:
+        DRIVE_REFRESH_TOKEN.encode('ascii')
+    except UnicodeEncodeError:
+        logger.error("Drive refresh token contains non-ASCII characters - likely corrupted")
+        return None
+    
     try:
         return Credentials(
             token=None,
@@ -342,14 +368,36 @@ def add_to_notion(job_data: dict) -> bool:
 # ---- Notification Helpers ----
 def send_simple_notification(job_data: dict) -> None:
     """Log notification to console/file for manual review"""
+    job_id = job_data.get('job_id', 'Unknown')
+    sig = _sign_job(job_id)
+    approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
+    deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
+    
     logger.info("=== ADMIN REVIEW REQUIRED ===")
-    logger.info(f"Job ID: {job_data.get('job_id')}")
+    logger.info(f"Job ID: {job_id}")
     logger.info(f"Status: {job_data.get('status')}")
     logger.info(f"Result: {job_data.get('result', {}).get('result', 'Unknown')}")
     logger.info(f"AI Probability: {job_data.get('ai_probability', 0)}")
     logger.info(f"File: {job_data.get('file', 'Unknown')}")
     logger.info(f"Upload Time: {job_data.get('upload_time', 'Unknown')}")
+    logger.info(f"✅ APPROVE: {approve_url}")
+    logger.info(f"❌ DENY: {deny_url}")
     logger.info("=== END ADMIN REVIEW ===")
+    
+    # Also save to a file for easy access
+    try:
+        with open(OUTPUT_DIR / "admin_reviews.txt", "a") as f:
+            f.write(f"\n=== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            f.write(f"Job ID: {job_id}\n")
+            f.write(f"Status: {job_data.get('status')}\n")
+            f.write(f"Result: {job_data.get('result', {}).get('result', 'Unknown')}\n")
+            f.write(f"AI Probability: {job_data.get('ai_probability', 0)}\n")
+            f.write(f"File: {job_data.get('file', 'Unknown')}\n")
+            f.write(f"✅ APPROVE: {approve_url}\n")
+            f.write(f"❌ DENY: {deny_url}\n")
+            f.write("=" * 50 + "\n")
+    except Exception as e:
+        logger.error(f"Failed to write to admin_reviews.txt: {e}")
 
 def send_webhook_notification(job_data: dict) -> bool:
     """Send notification via webhook (Discord/Slack)"""
@@ -445,19 +493,50 @@ def health():
 
 @app.get("/debug/email")
 def debug_email():
-    """Test email functionality"""
-    if not _gmail_available():
-        return {"ok": False, "error": "Gmail not configured"}
+    """Test email functionality and show detailed status"""
+    status = {
+        "gmail_available": GMAIL_AVAILABLE,
+        "admin_email_set": bool(ADMIN_EMAIL),
+        "gmail_sender_set": bool(GMAIL_SENDER),
+        "google_client_id_set": bool(GOOGLE_CLIENT_ID),
+        "google_client_secret_set": bool(GOOGLE_CLIENT_SECRET),
+        "gmail_refresh_token_set": bool(GMAIL_REFRESH_TOKEN),
+        "gmail_refresh_token_length": len(GMAIL_REFRESH_TOKEN) if GMAIL_REFRESH_TOKEN else 0,
+        "gmail_refresh_token_ascii": True
+    }
     
-    try:
-        success = send_gmail(
-            "TruthLens Test Email",
-            "This is a test email from TruthLens to verify Gmail integration is working.",
-            ADMIN_EMAIL
-        )
-        return {"ok": success, "message": "Test email sent" if success else "Failed to send email"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+    # Check if refresh token is ASCII
+    if GMAIL_REFRESH_TOKEN:
+        try:
+            GMAIL_REFRESH_TOKEN.encode('ascii')
+            status["gmail_refresh_token_ascii"] = True
+        except UnicodeEncodeError:
+            status["gmail_refresh_token_ascii"] = False
+            status["error"] = "Refresh token contains non-ASCII characters (corrupted)"
+    
+    # Test Gmail credentials
+    if _gmail_available():
+        try:
+            creds = _gmail_creds()
+            if creds:
+                status["credentials_created"] = True
+                # Try to send test email
+                success = send_gmail(
+                    "TruthLens Test Email",
+                    "This is a test email from TruthLens to verify Gmail integration is working.",
+                    ADMIN_EMAIL
+                )
+                status["test_email_sent"] = success
+                status["message"] = "Test email sent successfully" if success else "Failed to send test email"
+            else:
+                status["credentials_created"] = False
+                status["error"] = "Failed to create Gmail credentials"
+        except Exception as e:
+            status["error"] = f"Gmail test failed: {str(e)}"
+    else:
+        status["error"] = "Gmail not properly configured"
+    
+    return status
 
 @app.get("/debug/notification")
 def debug_notification():
@@ -956,6 +1035,33 @@ def list_jobs(request: Request):
     if request.headers.get("x-admin-key") != ADMIN_API_KEY:
         raise HTTPException(status_code=403, detail="Invalid admin key")
     return PENDING_JOBS
+
+@app.get("/admin/reviews")
+def get_pending_reviews():
+    """Get all jobs pending admin review with approval links"""
+    pending_jobs = []
+    
+    for job_id, job in PENDING_JOBS.items():
+        if job.get("status") == "PENDING_APPROVAL":
+            sig = _sign_job(job_id)
+            approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
+            deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
+            
+            pending_jobs.append({
+                "job_id": job_id,
+                "file": job.get("file", "Unknown"),
+                "status": job.get("status"),
+                "result": job.get("result", {}).get("result", "Unknown"),
+                "ai_probability": job.get("ai_probability", 0),
+                "upload_time": job.get("upload_time", "Unknown"),
+                "approve_url": approve_url,
+                "deny_url": deny_url
+            })
+    
+    return {
+        "pending_count": len(pending_jobs),
+        "jobs": pending_jobs
+    }
 
 @app.post("/reality-replay")
 async def reality_replay(file: UploadFile = File(...)):
