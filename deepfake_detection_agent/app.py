@@ -1,5 +1,5 @@
 # deepfake_detection_agent/app.py
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -49,14 +49,10 @@ except Exception:
 # =================== Config ===================
 PORT = int(os.getenv("PORT", "8001"))
 
-# CORS: either explicit list via FRONTEND_ORIGIN, or regex via FRONTEND_ORIGIN_REGEX
+# Frontend origin(s). You can set multiple, comma-separated:
+# FRONTEND_ORIGIN="https://chainbreaker.netlify.app, http://localhost:5173"
 origins_env = os.getenv("FRONTEND_ORIGIN", "")
-ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()]
-ALLOWED_ORIGIN_REGEX = os.getenv("FRONTEND_ORIGIN_REGEX")  # e.g. r"^https://([a-z0-9-]+\.)?chainbreaker\.netlify\.app$"
-
-# If nothing configured, default to local dev and your Netlify app (no "*", because allow_credentials=True)
-if not ALLOWED_ORIGINS and not ALLOWED_ORIGIN_REGEX:
-    ALLOWED_ORIGINS = ["http://localhost:5173", "https://chainbreaker.netlify.app"]
+ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()] or ["*"]
 
 # Max upload size (MB). Default 50 MB to be Render-friendly.
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
@@ -105,19 +101,16 @@ def _is_video(path: str) -> bool:
     return (mt or "").startswith("video/")
 
 # =================== FastAPI ===================
-app = FastAPI(title="TruthLens API (HIL + CORS + lazy models)", version="3.4")
+app = FastAPI(title="TruthLens API (HIL + CORS + lazy models)", version="3.3")
 
-cors_kwargs = dict(
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-if ALLOWED_ORIGIN_REGEX:
-    app.add_middleware(CORSMiddleware, allow_origin_regex=ALLOWED_ORIGIN_REGEX, **cors_kwargs)
-    print("CORS allow_origin_regex:", ALLOWED_ORIGIN_REGEX)
-else:
-    app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, **cors_kwargs)
-    print("CORS allow_origins:", ALLOWED_ORIGINS)
+print("CORS allow_origins:", ALLOWED_ORIGINS)
 
 # serve anything in ./output at /media/*
 app.mount("/media", StaticFiles(directory=str(OUTPUT_DIR), html=False), name="media")
@@ -130,7 +123,6 @@ def root():
 def config():
     return {
         "allowed_origins": ALLOWED_ORIGINS,
-        "allowed_origin_regex": ALLOWED_ORIGIN_REGEX,
         "max_upload_mb": MAX_UPLOAD_MB,
         "public_base_url": PUBLIC_BASE_URL,
     }
@@ -289,49 +281,13 @@ def _color(status: str) -> str:
 def _public_media_url(filename: str) -> str:
     return f"{PUBLIC_BASE_URL}/media/{filename}"
 
-# =================== Background worker ===================
-def _process_job(job_id: str, public_path: Path):
-    # 1) Detection with hard guard
-    try:
-        detection = detect_ai_content(str(public_path))
-    except Exception:
-        print("detect_ai_content crashed:", traceback.format_exc())
-        detection = {"result": "UNKNOWN", "ai_probability": None, "error": "detect_ai_content_crashed"}
-
-    job = PENDING_JOBS.get(job_id)
-    if not job:
-        return
-
-    job["result"] = detection
-
-    # 2) Optional: Drive upload (best-effort)
-    preview_link = None
-    try:
-        preview_link = upload_to_drive(str(public_path), DRIVE_FOLDER_ID) if _drive_available() else None
-    except Exception:
-        preview_link = None
-    job["preview_link"] = preview_link
-
-    # (Keep status PENDING for HIL; if you want auto-approve in dev, uncomment)
-    # job["status"] = "APPROVED"
-    # job["approved"] = True
-    # try:
-    #     replay_tmp = run_reality_replay(str(public_path))
-    #     replay_public_filename = f"replay_{job_id}.mp4"
-    #     replay_public_path = OUTPUT_DIR / replay_public_filename
-    #     if replay_tmp != str(replay_public_path):
-    #         shutil.copyfile(replay_tmp, replay_public_path)
-    #     job["replay_url"] = _public_media_url(replay_public_filename)
-    # except Exception:
-    #     job["replay_url"] = None
-
 # =================== Endpoints ===================
 
 @app.post("/analyze")
-async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
+async def analyze(file: UploadFile = File(...)):
     """
     1) Save upload to ./output
-    2) Queue detection in background (fast return)
+    2) Run detection
     3) Email admin (best-effort)
     4) Always return JSON (never raise 500)
     """
@@ -340,40 +296,45 @@ async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
     safe_name = f"{job_id}_{Path(file.filename or 'upload').name}"
     public_path = OUTPUT_DIR / safe_name
 
-    # Enforce max size (rough check based on chunks)
-    bytes_limit = MAX_UPLOAD_MB * 1024 * 1024
-    written = 0
-
     try:
         async with aiofiles.open(public_path, "wb") as f:
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
-                written += len(chunk)
-                if written > bytes_limit:
-                    raise ValueError(f"file_too_large>{MAX_UPLOAD_MB}MB")
                 await f.write(chunk)
     except Exception as e:
+        # I/O failure – report but don't 500
         print("Upload write failed:", traceback.format_exc())
-        return JSONResponse({"ok": False, "error": f"upload_failed: {str(e)}"}, status_code=200)
+        return JSONResponse({"ok": False, "error": f"upload_failed: {e.__class__.__name__}"}, status_code=200)
 
+    try:
+        detection = detect_ai_content(str(public_path))  # must never raise (see step 2)
+    except Exception:
+        # Absolute last resort: guard everything
+        print("detect_ai_content crashed:", traceback.format_exc())
+        detection = {"result": "UNKNOWN", "ai_probability": None, "error": "detect_ai_content_crashed"}
+
+    status = detection.get("result", "UNKNOWN")
     original_url = _public_media_url(safe_name)
 
-    # Initialize job immediately
+    preview_link = None
+    if _drive_available():
+        try:
+            preview_link = upload_to_drive(str(public_path), DRIVE_FOLDER_ID)
+        except Exception:
+            preview_link = None
+
     PENDING_JOBS[job_id] = {
         "status": "PENDING",
         "approved": False,
         "file": str(public_path),
-        "result": {"result": "PROCESSING"},
+        "result": detection,
         "created_at": int(time.time()),
-        "preview_link": None,
+        "preview_link": preview_link,
         "original_url": original_url,
         "replay_url": None,
     }
-
-    # Kick heavy work to background (prevents proxy timeouts/502)
-    background.add_task(_process_job, job_id, public_path)
 
     # best-effort email (never crash)
     try:
@@ -381,36 +342,35 @@ async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
             sig = _sign_job(job_id)
             approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
             deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
-            color = _color("PROCESSING")
+            color = _color(status)
             html = f"""
             <div style="font-family:system-ui,sans-serif">
                 <h2>New Submission Pending Review</h2>
                 <p><b>Filename:</b> {Path(public_path).name}</p>
-                <p><b>Preliminary Result:</b> <span style="color:{color}">PROCESSING</span></p>
-                <pre style="background:#0b1020;color:#e6edf3;padding:12px;border-radius:8px">{{}}</pre>
-                <p><a href="{original_url}">Local preview</a></p>
+                <p><b>Preliminary Result:</b> <span style="color:{color}">{status}</span></p>
+                <pre style="background:#0b1020;color:#e6edf3;padding:12px;border-radius:8px">{json.dumps(detection, indent=2)}</pre>
+                <p><a href="{original_url}">Local preview</a>{(' — <a href="'+preview_link+'">Drive preview</a>') if preview_link else ''}</p>
                 <p><a href="{approve_url}">✅ Approve</a> &nbsp;&nbsp; <a href="{deny_url}">❌ Deny</a></p>
             </div>"""
             send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
     except Exception:
         print("Admin email send failed:", traceback.format_exc())
 
-    # Always 200 so the browser never sees “Network error/CORS”
+    # always 200 so browser never sees “Network error/CORS”
     return {
         "ok": True,
         "job_id": job_id,
         "status": "PENDING",
-        "message": "Queued for analysis.",
-        "prelim_result": "PROCESSING",
-        "ai_probability": None,
-        "error": None,
+        "message": "Sent to admin for approval.",
+        "prelim_result": detection.get("result"),
+        "ai_probability": detection.get("ai_probability"),
+        "error": detection.get("error"),  # bubble up any internal error text for debugging
     }
 
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
     job = PENDING_JOBS.get(job_id)
     if not job or job["status"] != "APPROVED":
-        # If you'd prefer to return the current state instead of 404, replace this block:
         raise HTTPException(status_code=404, detail="Not found")
     return {
         "ok": True,
@@ -420,8 +380,8 @@ def get_job(job_id: str):
         "result": job.get("result", {}),
         "original_url": job.get("original_url"),
         "replay_url": job.get("replay_url"),
-        "original_link": job.get("original_url"),
-        "replay_link": job.get("replay_url"),
+        "original_link": job.get("original_url"),  # alias
+        "replay_link": job.get("replay_url"),      # alias
         "ai_probability": job.get("result", {}).get("ai_probability"),
         "file_name": Path(job.get("file", "")).name,
     }
@@ -481,34 +441,23 @@ def list_jobs(request: Request):
 @app.post("/reality-replay")
 async def reality_replay(file: UploadFile = File(...)):
     # refuse images here
-    filename = (file.filename or "upload").lower()
-    if (file.content_type or "").startswith("image/") or any(filename.endswith(e) for e in IMAGE_EXTS):
+    if (file.content_type or "").startswith("image/") or any(
+        (file.filename or "").lower().endswith(e) for e in IMAGE_EXTS
+    ):
         raise HTTPException(status_code=400, detail="Reality Replay is only for videos.")
 
-    # Save to /tmp
-    temp_path = f"/tmp/{filename if any(filename.endswith(e) for e in VIDEO_EXTS) else 'upload.mp4'}"
-    try:
-        async with aiofiles.open(temp_path, "wb") as f:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                await f.write(chunk)
-    except Exception:
-        try: os.remove(temp_path)
-        except Exception: pass
-        raise HTTPException(status_code=500, detail="Upload failed.")
+    temp_path = f"/tmp/{file.filename or 'upload.mp4'}"
+    async with aiofiles.open(temp_path, "wb") as f:
+        async for chunk in file.stream(1024 * 1024):
+            await f.write(chunk)
 
     if not _is_video(temp_path):
         try: os.remove(temp_path)
         except Exception: pass
         raise HTTPException(status_code=400, detail="Provided file is not a video.")
 
-    try:
-        restored_path = run_reality_replay(temp_path)
-        return FileResponse(restored_path, filename="reconstructed.mp4")
-    except Exception:
-        raise HTTPException(status_code=500, detail="Replay failed.")
+    restored_path = run_reality_replay(temp_path)
+    return FileResponse(restored_path, filename="reconstructed.mp4")
 
 # Local dev:
 if __name__ == "__main__":
