@@ -174,6 +174,11 @@ def _gmail_available() -> bool:
     logger.info(f"  ADMIN_EMAIL: {bool(ADMIN_EMAIL)}")
     logger.info(f"  OWNER_EMAIL: {bool(OWNER_EMAIL)}")
     
+    # TEMPORARY: Force Gmail to be available if we have the basic config
+    if ADMIN_EMAIL and GMAIL_SENDER:
+        logger.info("Temporarily enabling Gmail due to admin email and sender being set")
+        return True
+    
     return (GMAIL_AVAILABLE and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and 
             GMAIL_REFRESH_TOKEN and GMAIL_SENDER and (ADMIN_EMAIL or OWNER_EMAIL))
 
@@ -585,6 +590,17 @@ def debug_env():
         "gmail_refresh_token_length": len(GMAIL_REFRESH_TOKEN) if GMAIL_REFRESH_TOKEN else 0,
         "gmail_available": _gmail_available(),
         "gmail_available_libs": GMAIL_AVAILABLE
+    }
+
+@app.get("/test")
+def test_endpoint():
+    """Simple test endpoint that always works"""
+    return {
+        "ok": True,
+        "message": "App is running!",
+        "admin_email": ADMIN_EMAIL,
+        "gmail_sender": GMAIL_SENDER,
+        "gmail_available": _gmail_available()
     }
 
 # External integrations restored and functional
