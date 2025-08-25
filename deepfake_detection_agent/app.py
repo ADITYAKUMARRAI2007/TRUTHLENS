@@ -558,8 +558,8 @@ def _process_job(job_id: str, public_path: Path):
     # persist fields the frontend polls
     job["result"] = detection
     job["ai_probability"] = detection.get("ai_probability")
-    job["status"] = "APPROVED"  # Auto-approve after detection
-    job["approved"] = True
+    job["status"] = "PENDING_APPROVAL"  # Wait for admin approval
+    job["approved"] = False
     job["portia_result"] = portia_result
     
     # optional convenience copies (if the detector exposes them)
@@ -617,16 +617,21 @@ def _process_job(job_id: str, public_path: Path):
         except Exception as e:
             logger.warning("Notion add failed for job %s: %s", job_id, str(e))
 
-    # Send notifications
+    # Send HIL notification with Approve/Deny links
     try:
-        # Send email notification
+        # Generate approval links
+        sig = _sign_job(job_id)
+        approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
+        deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
+        
+        # Send email notification with HIL links
         if _gmail_available() and ADMIN_EMAIL:
-            subject = f"TruthLens Analysis Complete - Job {job_id}"
+            subject = f"TruthLens Analysis Ready for Review - Job {job_id}"
             result = detection.get("result", "Unknown")
             ai_prob = detection.get("ai_probability", 0)
             
             body = f"""
-TruthLens Analysis Complete
+TruthLens Analysis Ready for Review
 
 Job ID: {job_id}
 Result: {result}
@@ -639,14 +644,19 @@ Analysis Details:
 - Audio Score: {detection.get('audio_score', 'N/A')}
 - Image Score: {detection.get('image_score', 'N/A')}
 
+Original URL: {job.get('original_url', 'Not available')}
 Replay URL: {job.get('replay_url', 'Not available')}
 Drive Link: {drive_link or 'Not available'}
 
-This is an automated notification from TruthLens.
+=== HUMAN-IN-THE-LOOP REVIEW ===
+✅ APPROVE: {approve_url}
+❌ DENY: {deny_url}
+
+Please review the analysis and click one of the links above to approve or deny this job.
             """
             
             send_gmail(subject, body.strip(), ADMIN_EMAIL)
-            logger.info("Email notification sent for job %s", job_id)
+            logger.info("HIL email notification sent for job %s", job_id)
         
         # Send webhook notification
         send_webhook_notification(job)
@@ -655,7 +665,7 @@ This is an automated notification from TruthLens.
         send_simple_notification(job)
         
     except Exception as e:
-        logger.error("Notification failed for job %s: %s", job_id, str(e))
+        logger.error("HIL notification failed for job %s: %s", job_id, str(e))
 
     _save_job(job_id)
 
@@ -874,7 +884,7 @@ def approve_job(job_id: str, sig: str):
             except Exception as e:
                 logger.warning("Notion add failed for job %s: %s", job_id, str(e))
         
-        # Send email notification if available
+        # Send approval confirmation email
         if _gmail_available() and ADMIN_EMAIL:
             try:
                 subject = f"TruthLens Job Approved - Job {job_id}"
@@ -882,7 +892,7 @@ def approve_job(job_id: str, sig: str):
                 ai_prob = job.get("result", {}).get("ai_probability", 0)
                 
                 body = f"""
-TruthLens Job Approved
+TruthLens Job Approved ✅
 
 Job ID: {job_id}
 Result: {result}
@@ -890,15 +900,17 @@ AI Probability: {ai_prob:.2%}
 File: {job.get('file', 'Unknown')}
 Upload Time: {job.get('upload_time', 'Unknown')}
 
+Original URL: {job.get('original_url', 'Not available')}
+Replay URL: {job.get('replay_url', 'Not available')}
 Drive Link: {job.get('drive_link', 'Not available')}
 
-This job has been approved and is ready for review.
+This job has been approved and is now live.
                 """
                 
                 send_gmail(subject, body.strip(), ADMIN_EMAIL)
-                logger.info("Approval email sent for job %s", job_id)
+                logger.info("Approval confirmation email sent for job %s", job_id)
             except Exception as e:
-                logger.warning("Approval email failed for job %s: %s", job_id, str(e))
+                logger.warning("Approval confirmation email failed for job %s: %s", job_id, str(e))
         
         # Send webhook notification
         send_webhook_notification(job)

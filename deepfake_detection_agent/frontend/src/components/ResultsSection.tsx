@@ -61,6 +61,12 @@ const ResultsSection: React.FC<ResultsSectionProps> = ({
         const data = await resp.json();
 
         const isApproved = data?.status === 'APPROVED' || Boolean(data?.approved);
+        const isPendingApproval = data?.status === 'PENDING_APPROVAL';
+        
+        // If still pending approval, continue polling
+        if (isPendingApproval) return;
+        
+        // If not approved yet, continue polling
         if (!isApproved) return;
 
         setApproved(true);
