@@ -18,3 +18,11 @@ python-dotenv
 aiofiles
 jinja2
 requests
+fastapi
+uvicorn
+gunicorn
+python-multipart
+requests
+google-api-python-client
+google-auth
+google-auth-httplib2
