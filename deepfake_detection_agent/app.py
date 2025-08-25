@@ -419,19 +419,21 @@ async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
 @app.get("/jobs/{job_id}")
 def get_job(job_id: str):
     job = _load_job(job_id)
-    if not job or job["status"] != "APPROVED":
+    if not job:
         raise HTTPException(status_code=404, detail="Not found")
+    # Return the live job snapshot regardless of approval state so the UI can
+    # render progress immediately and fill in replay when it becomes available.
     return {
         "ok": True,
         "job_id": job_id,
-        "approved": True,
-        "status": "APPROVED",
+        "approved": bool(job.get("approved", False)),
+        "status": job.get("status", "PENDING"),
         "result": job.get("result", {}),
         "original_url": job.get("original_url"),
         "replay_url": job.get("replay_url"),
         "original_link": job.get("original_url"),
         "replay_link": job.get("replay_url"),
-        "ai_probability": job.get("result", {}).get("ai_probability"),
+        "ai_probability": (job.get("result") or {}).get("ai_probability"),
         "file_name": Path(job.get("file", "")).name,
     }
 def _run_replay_and_save(job_id: str, src_path: str, replay_public_path: Path):
