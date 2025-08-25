@@ -57,15 +57,14 @@ except Exception:
 # =================== Config ===================
 PORT = int(os.getenv("PORT", "8001"))
 
-# CORS: explicit list or regex (preferred if you have Netlify preview subdomains)
+# CORS: explicit list or regex
 origins_env = os.getenv("FRONTEND_ORIGIN", "")
 ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()]
-ALLOWED_ORIGIN_REGEX = os.getenv("FRONTEND_ORIGIN_REGEX")  # e.g. r"^https://([a-z0-9-]+\.)?chainbreaker\.netlify\.app$"
+ALLOWED_ORIGIN_REGEX = os.getenv("FRONTEND_ORIGIN_REGEX")
 if not ALLOWED_ORIGINS and not ALLOWED_ORIGIN_REGEX:
-    # Safe defaults for your setup; avoid "*" when allow_credentials=True
     ALLOWED_ORIGINS = ["https://chainbreaker.netlify.app", "http://localhost:5173"]
 
-# Max upload guard (MiB) to avoid proxy timeouts/502
+# Max upload guard (MiB)
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
@@ -118,7 +117,7 @@ def _is_video(path: str) -> bool:
     return (mt or "").startswith("video/")
 
 # =================== FastAPI ===================
-app = FastAPI(title="TruthLens API (HIL + Background + CORS)", version="3.7")
+app = FastAPI(title="TruthLens API (HIL + Background + CORS)", version="3.8")
 
 cors_kwargs = dict(
     allow_credentials=True,
@@ -361,7 +360,7 @@ def _load_job(job_id: str):
             logger.warning("load_job failed:\n%s", traceback.format_exc())
     return None
 
-# background worker
+# ---------- background workers ----------
 def _process_job(job_id: str, public_path: Path):
     try:
         detection = detect_ai_content(str(public_path))
@@ -382,6 +381,39 @@ def _process_job(job_id: str, public_path: Path):
     except Exception:
         preview_link = None
     job["preview_link"] = preview_link
+    _save_job(job_id)
+
+def _finalize_after_approve(job_id: str):
+    """
+    Runs after approve (in background). If result is still PROCESSING/UNKNOWN,
+    compute detection and build replay.
+    """
+    job = _load_job(job_id)
+    if not job:
+        return
+
+    src_path = job.get("file", "")
+    # Run detection only if needed
+    status_now = (job.get("result") or {}).get("result")
+    if status_now in (None, "PROCESSING", "UNKNOWN"):
+        try:
+            job["result"] = detect_ai_content(src_path)
+        except Exception:
+            logger.error("detect_ai_content (finalize) crashed:\n%s", traceback.format_exc())
+            job["result"] = {"result": "UNKNOWN", "ai_probability": None, "error": "detect_ai_content_crashed"}
+
+    # Generate replay (best-effort)
+    replay_public_filename = f"replay_{job_id}.mp4"
+    replay_public_path = OUTPUT_DIR / replay_public_filename
+    try:
+        replay_tmp = run_reality_replay(src_path)  # may equal src_path
+        if replay_tmp != str(replay_public_path):
+            shutil.copyfile(replay_tmp, replay_public_path)
+        job["replay_url"] = _public_media_url(replay_public_filename)
+    except Exception:
+        logger.error("Replay generation/copy failed:\n%s", traceback.format_exc())
+        job["replay_url"] = None
+
     _save_job(job_id)
 
 # =================== Endpoints ===================
@@ -491,54 +523,24 @@ def get_job(job_id: str):
     }
 
 @app.get("/jobs/{job_id}/approve")
-def approve_job(job_id: str, sig: str):
+def approve_job(job_id: str, sig: str, background: BackgroundTasks):
+    # Quick auth check
     if not _verify_sig(job_id, sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
+
     job = _load_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # If we already approved earlier, return quickly.
-    if job["status"] == "APPROVED":
-        return {"ok": True, "job_id": job_id, "status": "APPROVED"}
-
-    src_path = job["file"]
-
-    # 🔒 Safety net: if the background pass hasn't produced a result yet,
-    # run detection synchronously right now so the final report is not empty.
-    try:
-        current = (job.get("result") or {}).get("result")
-        if current in (None, "PROCESSING", "UNKNOWN"):
-            logger.info("approve_job: running synchronous detect_ai_content for job %s", job_id)
-            det = detect_ai_content(src_path)
-            job["result"] = det
-    except Exception:
-        logger.error("approve_job: detect_ai_content failed during approve:\n%s", traceback.format_exc())
-        # keep whatever we had; frontend will still show placeholders
-
-    # Optional orchestrator (best-effort)
-    try:
-        job["portia_result"] = run_through_portia(src_path)
-    except Exception:
-        logger.error("Portia pipeline failed:\n%s", traceback.format_exc())
-        job["portia_result"] = {"error": "portia_failed"}
-
-    # Reality Replay (best-effort)
-    replay_public_filename = f"replay_{job_id}.mp4"
-    replay_public_path = OUTPUT_DIR / replay_public_filename
-    try:
-        replay_tmp = run_reality_replay(src_path)  # may equal src_path in fallback
-        if replay_tmp != str(replay_public_path):
-            shutil.copyfile(replay_tmp, replay_public_path)
-        job["replay_url"] = _public_media_url(replay_public_filename)
-    except Exception:
-        logger.error("Replay generation/copy failed:\n%s", traceback.format_exc())
-        job["replay_url"] = None
-
+    # Mark approved immediately (fast response)
     job["status"] = "APPROVED"
     job["approved"] = True
     _save_job(job_id)
 
+    # Kick off heavy work in the background to avoid proxy timeouts
+    background.add_task(_finalize_after_approve, job_id)
+
+    # Return instantly so the email link never 502s
     return {"ok": True, "job_id": job_id, "status": "APPROVED"}
 
 @app.get("/jobs/{job_id}/deny")
