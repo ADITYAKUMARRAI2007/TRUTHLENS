@@ -51,12 +51,7 @@ except Exception:
 
 # Email functionality completely removed
 
-# ---- Portia orchestrator (optional) ----
-try:
-    from portia_agent import run_through_portia  # type: ignore
-except Exception:
-    def run_through_portia(path: str):
-        return {"skipped": True, "reason": "portia_agent not available"}
+# All external integrations removed
 
 # =================== Config ===================
 PORT = int(os.getenv("PORT", "8001"))
@@ -74,13 +69,7 @@ MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 # Email functionality completely removed
 
-# Drive OAuth
-DRIVE_REFRESH_TOKEN = os.getenv("DRIVE_REFRESH_TOKEN")
-DRIVE_FOLDER_ID = os.getenv("DRIVE_FOLDER_ID")
-
-# Notion
-NOTION_API_KEY = os.getenv("NOTION_API_KEY")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+# All external integrations removed
 
 # Admin
 APP_SECRET = os.getenv("APP_SECRET", "dev-secret-change-me")
@@ -169,9 +158,9 @@ def health():
     integrations = {
         "gmail_env_ready": False,
         "drive_env_ready": False,
-        "notion_env_ready": bool(NOTION_API_KEY and NOTION_DATABASE_ID),
-        "portia_ready": bool(os.getenv("PORTIA_API_KEY")),
-        "gemini_ready": bool(os.getenv("GOOGLE_API_KEY")),
+        "notion_env_ready": False,
+        "portia_ready": False,
+        "gemini_ready": False,
         "admin_email_set": False,
         "app_secret_set": APP_SECRET != "dev-secret-change-me",
     }
@@ -199,85 +188,7 @@ def debug_notification():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# =================== Drive helpers (optional) ===================
-def _drive_available() -> bool:
-    return False
-
-def _drive_creds():
-    raise RuntimeError("Drive functionality disabled")
-
-def upload_to_drive(file_path: str, folder_id: Optional[str]) -> Optional[str]:
-    if not _drive_available():
-        return None
-    if not file_path or not os.path.isfile(file_path):
-        logger.info("Drive upload skipped (file missing): %s", file_path)
-        return None
-    try:
-        creds = _drive_creds()
-        service = build("drive", "v3", credentials=creds)  # type: ignore
-        fname = os.path.basename(file_path)
-        media = MediaFileUpload(file_path, resumable=True)  # type: ignore
-        meta = {"name": fname}
-        if folder_id:
-            meta["parents"] = [folder_id]
-        created = service.files().create(body=meta, media_body=media, fields="id, webViewLink").execute()
-        file_id = created["id"]
-        try:
-            service.permissions().create(fileId=file_id, body={"role": "reader", "type": "anyone"}).execute()
-            created = service.files().get(fileId=file_id, fields="webViewLink").execute()
-        except Exception as e:
-            logger.warning("Drive permission set failed (non-fatal): %s", e)
-        return created.get("webViewLink")
-    except Exception:
-        logger.error("Drive upload failed:\n%s", traceback.format_exc())
-        return None
-
-# =================== Notion helpers (optional/debug) ===================
-NOTION_VERSION = "2022-06-28"
-
-def _notion_headers():
-    if not NOTION_API_KEY or requests is None:
-        raise RuntimeError("NOTION_API_KEY missing or requests not installed")
-    return {
-        "Authorization": f"Bearer {NOTION_API_KEY}",
-        "Notion-Version": NOTION_VERSION,
-        "Content-Type": "application/json",
-    }
-
-@app.get("/debug/notion/schema")
-def notion_schema():
-    if requests is None:
-        return {"error": "requests not installed"}
-    try:
-        url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}"
-        r = requests.get(url, headers=_notion_headers(), timeout=10)
-        return {"status": r.status_code, "json": r.json()}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/debug/notion/test")
-def notion_test():
-    if requests is None:
-        return {"error": "requests not installed"}
-    try:
-        now_ist = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%dT%H:%M:%S")
-        url = "https://api.notion.com/v1/pages"
-        body = {
-            "parent": {"database_id": NOTION_DATABASE_ID},
-            "properties": {
-                "Name": {"title": [{"text": {"content": "Test row from API"}}]},
-                "Status": {"status": {"name": "REAL"}},
-                "Run At": {"date": {"start": now_ist, "time_zone": "Asia/Kolkata"}},
-                "Video score": {"number": 0.42},
-                "Audio score": {"number": 0.88},
-                "Original link": {"url": "https://example.com/original"},
-                "Replay link": {"url": "https://example.com/replay"},
-            },
-        }
-        r = requests.post(url, headers=_notion_headers(), data=json.dumps(body), timeout=10)
-        return {"status": r.status_code, "json": r.json()}
-    except Exception:
-        return {"error": traceback.format_exc()}
+# All external integrations removed
 
 # =================== HIL / Jobs ===================
 PENDING_JOBS = {}  # {job_id: {...}}
@@ -539,12 +450,7 @@ def approve_job(job_id: str, sig: str):
 
     src_path = job["file"]
 
-    # orchestrator (best-effort)
-    try:
-        job["portia_result"] = run_through_portia(src_path)
-    except Exception:
-        logger.error("Portia pipeline failed:\n%s", traceback.format_exc())
-        job["portia_result"] = {"error": "portia_failed"}
+    # All external integrations removed
 
     # APPROVE IMMEDIATELY
     job["status"] = "APPROVED"
