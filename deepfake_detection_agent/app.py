@@ -100,6 +100,15 @@ except Exception as e:
 # =================== Config ===================
 PORT = int(os.getenv("PORT", "8001"))
 
+# Debug environment variables
+logger.info("=== Environment Variables Debug ===")
+logger.info(f"PORT: {os.getenv('PORT', '8001')}")
+logger.info(f"ADMIN_EMAIL: {os.getenv('ADMIN_EMAIL')}")
+logger.info(f"GMAIL_SENDER: {os.getenv('GMAIL_SENDER')}")
+logger.info(f"GOOGLE_CLIENT_ID: {os.getenv('GOOGLE_CLIENT_ID')[:20] if os.getenv('GOOGLE_CLIENT_ID') else 'None'}...")
+logger.info(f"GOOGLE_CLIENT_SECRET: {os.getenv('GOOGLE_CLIENT_SECRET')[:10] if os.getenv('GOOGLE_CLIENT_SECRET') else 'None'}...")
+logger.info(f"GMAIL_REFRESH_TOKEN: {os.getenv('GMAIL_REFRESH_TOKEN')[:20] if os.getenv('GMAIL_REFRESH_TOKEN') else 'None'}...")
+
 # CORS: explicit list or regex
 origins_env = os.getenv("FRONTEND_ORIGIN", "")
 ALLOWED_ORIGINS = [o.strip() for o in origins_env.split(",") if o.strip()]
