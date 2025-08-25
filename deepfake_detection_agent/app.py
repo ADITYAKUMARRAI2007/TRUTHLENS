@@ -34,13 +34,23 @@ except Exception:
     _ensure_video_bundle = None
     _ensure_audio_bundle = None
 
-try:
-    from backend.services.reality_replay import run_reality_replay  # type: ignore
-except Exception:
+def run_reality_replay(video_path: str) -> str:
+    """
+    Simple replay function that just returns the original video.
+    This ensures replay always works even if external services fail.
+    """
     try:
-        from backend.services.simple_replay import run_reality_replay  # type: ignore
+        # Try to use the simple replay service first
+        from backend.services.simple_replay import run_reality_replay as simple_replay
+        return simple_replay(video_path)
     except Exception:
-        def run_reality_replay(video_path: str) -> str:
+        try:
+            # Try to use the reality replay service
+            from backend.services.reality_replay import run_reality_replay as reality_replay
+            return reality_replay(video_path)
+        except Exception:
+            # Fallback: just return the original video
+            logger.warning(f"Replay generation failed for {video_path}, using original")
             return video_path
 
 # ---- optional deps ----
@@ -263,6 +273,37 @@ def _process_job(job_id: str, public_path: Path):
         job["video_score"] = detection["video_score"]
     if "audio_score" in detection:
         job["audio_score"] = detection["audio_score"]
+
+    # Generate replay immediately after detection
+    try:
+        replay_public_filename = f"replay_{job_id}.mp4"
+        replay_public_path = OUTPUT_DIR / replay_public_filename
+        
+        # Generate replay
+        replay_tmp = run_reality_replay(str(public_path))
+        
+        # Copy replay to public directory
+        if replay_tmp and replay_tmp != str(replay_public_path):
+            shutil.copyfile(replay_tmp, replay_public_path)
+            job["replay_url"] = _public_media_url(replay_public_filename)
+            logger.info("Replay generated for job %s: %s", job_id, job["replay_url"])
+        else:
+            # Fallback: copy original video as replay
+            shutil.copyfile(str(public_path), replay_public_path)
+            job["replay_url"] = _public_media_url(replay_public_filename)
+            logger.info("Fallback replay created for job %s", job_id)
+    except Exception as e:
+        logger.error("Replay generation failed for job %s: %s", job_id, str(e))
+        # Try fallback replay
+        try:
+            replay_public_filename = f"replay_{job_id}.mp4"
+            replay_public_path = OUTPUT_DIR / replay_public_filename
+            shutil.copyfile(str(public_path), replay_public_path)
+            job["replay_url"] = _public_media_url(replay_public_filename)
+            logger.info("Fallback replay created for job %s after error", job_id)
+        except Exception as fallback_error:
+            logger.error("All replay generation failed for job %s: %s", job_id, str(fallback_error))
+            job["replay_url"] = None
 
     _save_job(job_id)
 
