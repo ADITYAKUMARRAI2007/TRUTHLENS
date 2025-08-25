@@ -491,7 +491,7 @@ def get_job(job_id: str):
     }
 
 @app.get("/jobs/{job_id}/approve")
-def approve_job(job_id: str, sig: str):
+def approve_job(job_id: str, sig: str, background: BackgroundTasks):
     if not _verify_sig(job_id, sig):
         raise HTTPException(status_code=403, detail="Invalid signature")
     job = _load_job(job_id)
@@ -500,30 +500,36 @@ def approve_job(job_id: str, sig: str):
     if job["status"] == "APPROVED":
         return {"ok": True, "job_id": job_id, "status": "APPROVED"}
 
-    src_path = job["file"]
-
-    # orchestrator (best-effort)
-    try:
-        job["portia_result"] = run_through_portia(src_path)
-    except Exception:
-        logger.error("Portia pipeline failed:\n%s", traceback.format_exc())
-        job["portia_result"] = {"error": "portia_failed"}
-
-    # replay -> expose via /media
-    replay_public_filename = f"replay_{job_id}.mp4"
-    replay_public_path = OUTPUT_DIR / replay_public_filename
-    try:
-        replay_tmp = run_reality_replay(src_path)  # may equal src_path in fallback
-        if replay_tmp != str(replay_public_path):
-            shutil.copyfile(replay_tmp, replay_public_path)
-        job["replay_url"] = _public_media_url(replay_public_filename)
-    except Exception:
-        logger.error("Replay generation/copy failed:\n%s", traceback.format_exc())
-        job["replay_url"] = None
-
+    # Mark approved immediately (fast return)
     job["status"] = "APPROVED"
     job["approved"] = True
     _save_job(job_id)
+    src_path = job["file"]
+
+    # Heavy work in background to avoid Render timeouts
+    def _post_approve_work():
+        # orchestrator (best-effort)
+        try:
+            job["portia_result"] = run_through_portia(src_path)
+        except Exception:
+            logger.error("Portia pipeline failed:\n%s", traceback.format_exc())
+            job["portia_result"] = {"error": "portia_failed"}
+
+        # replay -> expose via /media
+        replay_public_filename = f"replay_{job_id}.mp4"
+        replay_public_path = OUTPUT_DIR / replay_public_filename
+        try:
+            replay_tmp = run_reality_replay(src_path)  # may equal src_path in fallback
+            if replay_tmp != str(replay_public_path):
+                shutil.copyfile(replay_tmp, replay_public_path)
+            job["replay_url"] = _public_media_url(replay_public_filename)
+        except Exception:
+            logger.error("Replay generation/copy failed:\n%s", traceback.format_exc())
+            job["replay_url"] = None
+
+        _save_job(job_id)
+
+    background.add_task(_post_approve_work)
     return {"ok": True, "job_id": job_id, "status": "APPROVED"}
 
 @app.get("/jobs/{job_id}/deny")
