@@ -539,10 +539,18 @@ async def analyze(background: BackgroundTasks, file: UploadFile = File(...)):
             send_gmail(ADMIN_EMAIL, "[TruthLens] Review Required", html)
             logger.info("Admin email sent successfully")
         else:
-            logger.warning(f"Gmail not available or ADMIN_EMAIL not set. Gmail available: {_gmail_available()}, ADMIN_EMAIL: {ADMIN_EMAIL}")
+            logger.warning(f"Gmail not available or ADMIN_EMAIL not set. Using fallback notification.")
+            logger.warning(f"Gmail available: {_gmail_available()}, ADMIN_EMAIL: {ADMIN_EMAIL}")
+            # Use fallback notification
+            send_simple_notification(job_id, Path(public_path).name, original_url)
     except Exception as e:
         logger.error(f"Admin email send failed: {e}")
         logger.error("Admin email send failed:\n%s", traceback.format_exc())
+        # Use fallback notification even if email fails
+        try:
+            send_simple_notification(job_id, Path(public_path).name, original_url)
+        except Exception as fallback_error:
+            logger.error(f"Fallback notification also failed: {fallback_error}")
 
     return {
         "ok": True,
@@ -707,6 +715,40 @@ async def reality_replay(file: UploadFile = File(...)):
         return FileResponse(restored_path, filename="reconstructed.mp4")
     except Exception:
         raise HTTPException(status_code=500, detail="Replay failed.")
+
+# =================== Simple Email Fallback ===================
+def send_simple_notification(job_id: str, filename: str, original_url: str):
+    """
+    Simple notification method when Gmail is not available.
+    This logs the approval URLs so you can manually approve.
+    """
+    try:
+        sig = _sign_job(job_id)
+        approve_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/approve?sig={sig}"
+        deny_url = f"{PUBLIC_BASE_URL}/jobs/{job_id}/deny?sig={sig}"
+        
+        logger.info("=" * 80)
+        logger.info("📧 ADMIN REVIEW REQUIRED - Gmail not available")
+        logger.info("=" * 80)
+        logger.info(f"Job ID: {job_id}")
+        logger.info(f"Filename: {filename}")
+        logger.info(f"Original URL: {original_url}")
+        logger.info(f"✅ Approve: {approve_url}")
+        logger.info(f"❌ Deny: {deny_url}")
+        logger.info("=" * 80)
+        
+        # Also log to a file for easy access
+        with open("admin_reviews.log", "a") as f:
+            f.write(f"\n{'-'*50}\n")
+            f.write(f"Time: {datetime.now()}\n")
+            f.write(f"Job ID: {job_id}\n")
+            f.write(f"Filename: {filename}\n")
+            f.write(f"Approve: {approve_url}\n")
+            f.write(f"Deny: {deny_url}\n")
+            f.write(f"{'-'*50}\n")
+            
+    except Exception as e:
+        logger.error(f"Simple notification failed: {e}")
 
 # Local dev:
 if __name__ == "__main__":
