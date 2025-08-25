@@ -101,7 +101,7 @@ def _is_video(path: str) -> bool:
     return (mt or "").startswith("video/")
 
 # =================== FastAPI ===================
-app = FastAPI(title="TruthLens API (HIL + CORS + lazy models)", version="3.3")
+app = FastAPI(title="TruthLens API (HIL + CORS + lazy models)", version="3.6")
 
 app.add_middleware(
     CORSMiddleware,
@@ -160,7 +160,18 @@ def _gmail_creds():
         client_secret=GOOGLE_CLIENT_SECRET,
         scopes=["https://www.googleapis.com/auth/gmail.send"],
     )
-
+@app.get("/debug/email")
+def debug_email(to: Optional[str] = None):
+    try:
+        dest = (to or os.getenv("ADMIN_EMAIL") or os.getenv("OWNER_EMAIL") or os.getenv("GMAIL_SENDER"))
+        if not dest:
+            return {"ok": False, "error": "no destination email configured"}
+        send_gmail(dest, "[TruthLens] Debug Email", "<p>If you see this, Gmail API is working ✅</p>")
+        print(f"Gmail sent to {dest}")
+        return {"ok": True, "sent_to": dest}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    
 def send_gmail(to_addr: str, subject: str, html_body: str):
     if not _gmail_available():
         print("Gmail not available; skipping email.")
