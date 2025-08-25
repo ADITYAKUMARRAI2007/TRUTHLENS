@@ -5,9 +5,7 @@ services:
     env: python
     plan: free
     region: oregon
-    buildCommand: |
-      pip install -r deepfake_detection_agent/requirements.txt
-      pip install -r deepfake_detection_agent/backend/requirements.txt
+    buildCommand: pip install -r deepfake_detection_agent/requirements.txt
     startCommand: cd deepfake_detection_agent && python start_production.py
     autoDeploy: true
     envVars:

@@ -15,7 +15,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("truthlens")
 
 # ---- detection / replay (soft-optional for replay) ----
-from backend.services.detection import detect_ai_content
+try:
+    from backend.services.detection import detect_ai_content
+except Exception as e:
+    logger.warning(f"Detection service not available: {e}")
+    def detect_ai_content(video_path: str):
+        return {
+            "result": "UNKNOWN",
+            "ai_probability": 0.5,
+            "error": "detection_service_not_available"
+        }
+
 try:
     from backend.services.detection import (
         _ensure_video_bundle, _ensure_audio_bundle
