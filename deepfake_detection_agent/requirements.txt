@@ -9,20 +9,13 @@ aiofiles
 requests
 ffmpeg-python
 
-# AI Detection Dependencies
+# AI Detection Dependencies (simplified)
 torch
 torchvision
 transformers
 librosa
 Pillow
 timm
-c2pa
-exifread
-invisible-watermark
-noiseprint
-PyPDF2
-pdf2image
-pytesseract
 
 # Gmail Integration
 google-auth
@@ -30,11 +23,11 @@ google-auth-oauthlib
 google-auth-httplib2
 google-api-python-client
 
-# Google Drive Integration
-google-auth
-google-auth-oauthlib
-google-auth-httplib2
-google-api-python-client
+# Google Drive Integration (same as Gmail)
+# google-auth
+# google-auth-oauthlib
+# google-auth-httplib2
+# google-api-python-client
 
 # Notion Integration
 requests
