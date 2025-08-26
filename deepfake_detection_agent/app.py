@@ -180,10 +180,31 @@ except Exception as e:
 
 # ---- Portia Integration ----
 try:
-    from portia_agent import run_through_portia
-    PORTIA_IMPORT_AVAILABLE = True
+    # Try multiple import strategies
+    try:
+        from portia_agent import run_through_portia
+        PORTIA_IMPORT_AVAILABLE = True
+        logger.info("✅ Portia imported successfully (direct import)")
+    except ImportError:
+        # Try relative import
+        from .portia_agent import run_through_portia
+        PORTIA_IMPORT_AVAILABLE = True
+        logger.info("✅ Portia imported successfully (relative import)")
+    except ImportError:
+        # Try absolute import
+        import sys
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+        from portia_agent import run_through_portia
+        PORTIA_IMPORT_AVAILABLE = True
+        logger.info("✅ Portia imported successfully (absolute import)")
 except Exception as e:
-    logger.warning(f"Portia integration not available: {e}")
+    logger.warning(f"❌ Portia integration not available: {e}")
+    logger.warning(f"   Error type: {type(e).__name__}")
+    import traceback
+    logger.warning(f"   Full traceback: {traceback.format_exc()}")
     PORTIA_IMPORT_AVAILABLE = False
 
 # ---- Gemini Integration ----
@@ -273,7 +294,14 @@ def _is_video(path: str) -> bool:
 # ---- Portia Helpers ----
 def _portia_available() -> bool:
     """Check if Portia is available (import + API key)"""
-    return PORTIA_IMPORT_AVAILABLE and bool(PORTIA_API_KEY)
+    logger.info(f"Portia availability check:")
+    logger.info(f"  PORTIA_IMPORT_AVAILABLE: {PORTIA_IMPORT_AVAILABLE}")
+    logger.info(f"  PORTIA_API_KEY: {bool(PORTIA_API_KEY)}")
+    logger.info(f"  PORTIA_API_KEY value: {PORTIA_API_KEY[:20] if PORTIA_API_KEY else 'None'}...")
+    
+    result = PORTIA_IMPORT_AVAILABLE and bool(PORTIA_API_KEY)
+    logger.info(f"  Final result: {result}")
+    return result
 
 # ---- Gemini Helpers ----
 def _gemini_available() -> bool:
