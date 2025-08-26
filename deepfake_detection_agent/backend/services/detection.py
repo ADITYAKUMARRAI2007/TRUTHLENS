@@ -111,9 +111,9 @@ def detect_video_simple(path: str) -> Dict[str, Any]:
             fake_prob = probs.get("fake", 0.0)
             
             # Determine result
-            if fake_prob > 0.7:
+            if fake_prob > 0.5:
                 result = "FAKE"
-            elif real_prob > 0.7:
+            elif real_prob > 0.4:
                 result = "REAL"
             else:
                 result = "UNCERTAIN"
@@ -342,9 +342,9 @@ def detect_ai_content(path: str) -> dict:
         final_score = 0.7 * video_score + 0.3 * audio_score
 
     # Determine result
-    if final_score > 0.7:
+    if final_score > 0.55:
         label = "FAKE"
-    elif final_score < 0.3:
+    elif final_score < 0.40:
         label = "REAL"
     else:
         label = "UNCERTAIN"
