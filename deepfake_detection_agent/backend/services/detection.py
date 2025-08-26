@@ -12,7 +12,11 @@ import math
 import json
 import tempfile
 import subprocess
+import logging
 from typing import Optional, Dict, Any, Set
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 import torch
 import numpy as np
@@ -92,7 +96,58 @@ def detect_image_simple(path: str) -> Dict[str, Any]:
         }
 
 def detect_video_simple(path: str) -> Dict[str, Any]:
-    """Simple video detection using basic heuristics"""
+    """AI-powered video detection using trained models"""
+    try:
+        # Try to use the AI-powered detection first
+        try:
+            from .gradcam import detect_deepfake
+            logger.info("Using AI-powered deepfake detection with CLIP models")
+            
+            # Run AI detection
+            probs, heatmap_path = detect_deepfake(path, output_dir="output")
+            
+            # Extract probabilities
+            real_prob = probs.get("real", 0.0)
+            fake_prob = probs.get("fake", 0.0)
+            
+            # Determine result
+            if fake_prob > 0.7:
+                result = "FAKE"
+            elif real_prob > 0.7:
+                result = "REAL"
+            else:
+                result = "UNCERTAIN"
+            
+            return {
+                "result": result,
+                "ai_probability": float(fake_prob),
+                "video_score": float(fake_prob),
+                "signals": {
+                    "real_probability": float(real_prob),
+                    "fake_probability": float(fake_prob),
+                    "analysis_method": "ai_clip_models",
+                    "heatmap_video": heatmap_path,
+                    "confidence": "high"
+                }
+            }
+            
+        except ImportError:
+            logger.warning("AI models not available, falling back to basic heuristics")
+            return _fallback_video_detection(path)
+        except Exception as e:
+            logger.warning(f"AI detection failed: {e}, falling back to basic heuristics")
+            return _fallback_video_detection(path)
+            
+    except Exception as e:
+        return {
+            "result": "UNKNOWN",
+            "ai_probability": 0.5,
+            "video_score": 0.5,
+            "error": f"video_analysis_failed: {str(e)}"
+        }
+
+def _fallback_video_detection(path: str) -> Dict[str, Any]:
+    """Fallback to basic heuristics when AI models fail"""
     try:
         cap = cv2.VideoCapture(path)
         if not cap.isOpened():
@@ -146,22 +201,32 @@ def detect_video_simple(path: str) -> Dict[str, Any]:
         # Calculate average score
         avg_score = total_score / frame_count
         
+        # Determine result based on average score
+        if avg_score > 0.7:
+            result = "FAKE"
+        elif avg_score < 0.3:
+            result = "UNCERTAIN"
+        else:
+            result = "REAL"
+        
         return {
-            "result": "FAKE" if avg_score > 0.7 else "REAL" if avg_score < 0.3 else "UNCERTAIN",
+            "result": result,
             "ai_probability": float(avg_score),
             "video_score": float(avg_score),
             "signals": {
                 "frames_analyzed": frame_count,
-                "avg_uniformity": float(np.mean([s for s in scores])),
-                "score_variance": float(np.var(scores))
+                "uniformity_scores": scores,
+                "analysis_method": "basic_heuristics_fallback",
+                "confidence": "low"
             }
         }
+        
     except Exception as e:
         return {
             "result": "UNKNOWN",
             "ai_probability": 0.5,
             "video_score": 0.5,
-            "error": f"video_detection_failed: {str(e)}"
+            "error": f"fallback_video_analysis_failed: {str(e)}"
         }
 
 def detect_audio_simple(path: str) -> Optional[float]:
